@@ -15,8 +15,8 @@ const geistMono = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "团队时段标记",
-  description: "按周标记团队可用时段",
+  title: "来牌",
+  description: "标记越牌时间",
 };
 
 export default function RootLayout({
