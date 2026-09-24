@@ -3,14 +3,17 @@ import { readFile } from "node:fs/promises";
 import { after, before, test } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import { getCurrentWeekKey, shiftWeekKey } from "../lib/week";
+import { SCHEDULE_VERSION, SLOT_COUNT, WEEK_CELL_COUNT } from "../lib/schedule";
 
-const migrationFiles = [
+const coreMigrationFiles = [
   "supabase/migrations/202609240001_schema.sql",
   "supabase/migrations/202609240002_auth_and_marks.sql",
   "supabase/migrations/202609240003_admin.sql",
   "supabase/migrations/202609240004_privileges.sql",
   "supabase/migrations/20260924133213_defer_registration_validation.sql",
 ] as const;
+const scheduleMigrationFile = "supabase/migrations/20260924140810_five_daily_slots.sql";
+const migrationFiles = [...coreMigrationFiles, scheduleMigrationFile] as const;
 
 const ids = {
   admin: "00000000-0000-4000-8000-000000000001",
@@ -24,8 +27,8 @@ async function query<T extends Record<string, unknown>>(sql: string, params: unk
   return (await db.query<T>(sql, params)).rows;
 }
 
-async function applyMigrations(target: PGlite): Promise<void> {
-  for (const path of migrationFiles) {
+async function applyMigrations(target: PGlite, files: readonly string[] = migrationFiles): Promise<void> {
+  for (const path of files) {
     await target.exec(await readFile(path, "utf8"));
   }
 }
@@ -56,7 +59,7 @@ async function resetDatabase(legacy = false): Promise<PGlite> {
       "is_admin boolean not null default false,is_banned boolean not null default false);" +
       "create table public.marks (id uuid primary key default gen_random_uuid()," +
       "user_id uuid not null references auth.users(id) on delete cascade,week_key text not null,day_index integer not null," +
-      "slot_index integer not null,nickname text not null,location text not null,created_at timestamptz not null default now());",
+      "slot_index integer not null check(slot_index between 0 and 3),nickname text not null,location text not null,created_at timestamptz not null default now());",
     );
     await target.query(
       "insert into public.profiles(id,username,is_admin,is_banned) values($1,'admin',true,false),($2,'member',false,true)",
@@ -72,7 +75,7 @@ async function resetDatabase(legacy = false): Promise<PGlite> {
 
 before(async () => {
   db = await resetDatabase(true);
-  await applyMigrations(db);
+  await applyMigrations(db, coreMigrationFiles);
 });
 
 after(async () => {
@@ -256,6 +259,80 @@ test("deferred Auth registration validates final app metadata atomically", async
       "a rejected third account rolls back both identity and quota changes");
   } finally {
     await fresh.close();
+  }
+});
+
+test("five-slot migration guards legacy marks and preserves schedule-version RPC safety", async () => {
+  const fresh = await resetDatabase();
+  const guard = await resetDatabase(true);
+  try {
+    await applyMigrations(fresh);
+    const userId = "00000000-0000-4000-8000-000000000201";
+    const session = "a".repeat(64);
+    await addAuthUser(fresh, { id: userId, username: "slottester", deviceHash: "b".repeat(64) });
+    await fresh.query("select public.app_register_session($1,$2,$3)", [userId, session, 0]);
+
+    await assert.rejects(
+      fresh.query("select public.app_upsert_marks($1,$2,$3::jsonb)", [session, currentWeek, JSON.stringify([{ day_index: 0, slot_index: 0, nickname: "old-client", location: "" }])]),
+      /schedule version mismatch/,
+      "the prior RPC item shape must be rejected instead of reinterpreted",
+    );
+
+    const items = Array.from({ length: WEEK_CELL_COUNT }, (_, index) => ({
+      day_index: Math.floor(index / SLOT_COUNT),
+      slot_index: index % SLOT_COUNT,
+      nickname: `slot-${index}`,
+      location: "",
+      schedule_version: SCHEDULE_VERSION,
+    }));
+    const saved = (await fresh.query<{ app_upsert_marks: { accepted: number; changed: number } }>(
+      "select public.app_upsert_marks($1,$2,$3::jsonb)", [session, currentWeek, JSON.stringify(items)],
+    )).rows[0].app_upsert_marks;
+    assert.equal(saved.accepted, WEEK_CELL_COUNT);
+    assert.equal(saved.changed, WEEK_CELL_COUNT);
+    assert.equal((await fresh.query<{ n: number }>("select count(*)::int as n from public.marks where week_key=$1", [currentWeek])).rows[0].n, WEEK_CELL_COUNT);
+    assert.equal((await fresh.query<{ n: number }>("select count(*)::int as n from public.marks where week_key=$1 and slot_index=4", [currentWeek])).rows[0].n, 7);
+
+    const fifthSlot = (await fresh.query<{ app_list_cell: { total: number; items: { nickname: string }[] } }>(
+      "select public.app_list_cell($1,$2,0,4,null,null,30)", [session, currentWeek],
+    )).rows[0].app_list_cell;
+    assert.equal(fifthSlot.total, 1);
+    assert.equal(fifthSlot.items[0].nickname, "slot-4", "the fifth slot is queryable by its original index");
+    await assert.rejects(
+      fresh.query("select public.app_upsert_marks($1,$2,$3::jsonb)", [session, currentWeek, JSON.stringify([{ day_index: 0, slot_index: 5, nickname: "invalid", location: "", schedule_version: SCHEDULE_VERSION }])]),
+      /invalid mark item/,
+    );
+    await assert.rejects(
+      fresh.query("select public.app_upsert_marks($1,$2,$3::jsonb)", [session, currentWeek, JSON.stringify([...items, { ...items[0], day_index: 0, slot_index: 0 }])]),
+      /items must contain 1 to 35 cells/,
+    );
+    const access = (await fresh.query<{ anon_cell: boolean; anon_write: boolean; service_cell: boolean; service_write: boolean }>(
+      "select has_function_privilege('anon','public.app_list_cell(text,text,integer,integer,timestamp with time zone,uuid,integer)','execute') anon_cell," +
+      "has_function_privilege('anon','public.app_upsert_marks(text,text,jsonb)','execute') anon_write," +
+      "has_function_privilege('service_role','public.app_list_cell(text,text,integer,integer,timestamp with time zone,uuid,integer)','execute') service_cell," +
+      "has_function_privilege('service_role','public.app_upsert_marks(text,text,jsonb)','execute') service_write",
+    )).rows[0];
+    assert.deepEqual(access, { anon_cell: false, anon_write: false, service_cell: true, service_write: true });
+
+    await applyMigrations(guard, coreMigrationFiles);
+    const before = (await guard.query<{ n: number; location: string }>(
+      "select count(*)::int as n,min(location) as location from public.marks",
+    )).rows[0];
+    assert.equal(before.n, 1);
+    await assert.rejects(guard.exec(await readFile(scheduleMigrationFile, "utf8")), /public\.marks contains existing rows/);
+    await guard.exec("rollback");
+    const afterGuard = (await guard.query<{ n: number; location: string }>(
+      "select count(*)::int as n,min(location) as location from public.marks",
+    )).rows[0];
+    assert.deepEqual(afterGuard, before, "the failed migration must retain legacy rows unchanged");
+    await assert.rejects(
+      guard.query("insert into public.marks(user_id,week_key,day_index,slot_index,nickname,location) values($1,$2,0,4,'new','皆可')", [ids.admin, currentWeek]),
+      /marks_slot_index_check/,
+      "the slot constraint remains at the old meaning after the guard aborts",
+    );
+  } finally {
+    await fresh.close();
+    await guard.close();
   }
 });
 

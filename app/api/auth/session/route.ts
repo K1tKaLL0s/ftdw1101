@@ -7,5 +7,5 @@ export const dynamic = "force-dynamic";
 export const GET = api(async () => {
   await ensureDeviceHash();
   const session = await currentSession();
-  return json({ user: session ? { id: session.id, username: session.username, isAdmin: session.isAdmin } : null });
+  return json({ user: session ? { id: session.id, username: session.username, isAdmin: session.isAdmin } : null, serverTime: new Date().toISOString() });
 });

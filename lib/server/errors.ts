@@ -20,6 +20,9 @@ export class AppError extends Error {
 }
 
 export function fromDatabaseError(code: string | undefined, message: string): AppError {
+  if (message.toLowerCase().includes("schedule version mismatch")) {
+    return new AppError(422, "schedule_version_mismatch", "时段已更新，请刷新页面后重试。");
+  }
   if (message.toLowerCase().includes("device account quota")) {
     return new AppError(409, "device_limit", "此浏览器已达到两个账号的注册上限。");
   }

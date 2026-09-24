@@ -1,18 +1,20 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { SLOT_COUNT, WEEK_CELL_COUNT, SCHEDULE_VERSION } from "../lib/schedule";
 
 type Slot = { dayIndex: number; slotIndex: number; count: number; mine: boolean };
 const user = { id: "11111111-1111-4111-8111-111111111111", username: "player_01", isAdmin: false };
 const admin = { id: "22222222-2222-4222-8222-222222222222", username: "admin_01", isAdmin: true };
 const ok = (data: unknown, status = 200) => ({ status, contentType: "application/json", body: JSON.stringify(data) });
-const emptySlots = (): Slot[] => Array.from({ length: 28 }, (_, index) => ({ dayIndex: Math.floor(index / 4), slotIndex: index % 4, count: 0, mine: false }));
+const emptySlots = (): Slot[] => Array.from({ length: WEEK_CELL_COUNT }, (_, index) => ({ dayIndex: Math.floor(index / SLOT_COUNT), slotIndex: index % SLOT_COUNT, count: 0, mine: false }));
 
-async function mockHome(page: Page, options: { detailCounts?: boolean; onSave?: (route: Route, count: number) => Promise<void> } = {}) {
-  await page.route("**/api/auth/session", (route) => route.fulfill(ok({ user })));
+async function mockHome(page: Page, options: { detailCounts?: boolean; serverTime?: () => string; onSave?: (route: Route, count: number) => Promise<void> } = {}) {
+  const serverTime = () => options.serverTime?.() ?? new Date().toISOString();
+  await page.route("**/api/auth/session", (route) => route.fulfill(ok({ user, serverTime: serverTime() })));
   let saves = 0;
   await page.route("**/api/marks?*", (route) => {
     const slots = emptySlots();
-    if (options.detailCounts) { slots[0].count = 1; slots[4].count = 1; }
-    return route.fulfill(ok({ weekKey: new URL(route.request().url()).searchParams.get("week"), slots }));
+    if (options.detailCounts) { slots[0].count = 1; slots[SLOT_COUNT].count = 1; }
+    return route.fulfill(ok({ weekKey: new URL(route.request().url()).searchParams.get("week"), slots, serverTime: serverTime() }));
   });
   await page.route("**/api/marks", async (route) => {
     if (route.request().method() !== "POST") return route.fulfill(ok({ error: "unexpected" }, 405));
@@ -72,10 +74,54 @@ test("home retains failed entry values, saves a blank location, and stays signed
   await expect(page.getByRole("status")).toContainText("已保存 1 条登记");
   const items = submitted?.items as Array<{ nickname: string; location: string }>;
   expect(items[0]).toMatchObject({ nickname: "小林", location: "" });
+  expect(submitted?.schedule_version).toBe(SCHEDULE_VERSION);
   await page.getByRole("button", { name: "退出" }).click();
   await expect(page.locator("main > p[role=alert]")).toContainText("logout temporarily unavailable");
   await expect(page.getByText("player_01", { exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+});
+
+test("Shanghai schedule clock follows midnight, the new week, and the 08:00 slot after foregrounding", async ({ page }) => {
+  let serverNow = new Date("2026-09-27T15:59:00.000Z");
+  await page.clock.install({ time: serverNow });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockHome(page, { serverTime: () => serverNow.toISOString() });
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "填写登记" })).toBeVisible();
+  await expect(page.getByText("北京时间 2026-09-27 23:59:00", { exact: true })).toBeVisible();
+  await expect(page.getByText(/2026-09-21 至 2026-09-27/)).toBeVisible();
+  await expect(page.locator('button[aria-pressed="true"]').filter({ hasText: "周日" })).toBeVisible();
+  await expect(page.getByText("当前时段", { exact: true })).toHaveCount(0);
+
+  serverNow = new Date("2026-09-27T16:00:00.000Z");
+  await page.clock.fastForward("00:01:00");
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(page.getByText("北京时间 2026-09-28 00:00:00", { exact: true })).toBeVisible();
+  await expect(page.getByText(/2026-09-28 至 2026-10-04/)).toBeVisible();
+  await expect(page.locator('button[aria-pressed="true"]').filter({ hasText: "周一" })).toBeVisible();
+
+  await page.getByRole("button", { name: "上一周" }).click();
+  await expect(page.getByText(/2026-09-21 至 2026-09-27/)).toBeVisible();
+
+  serverNow = new Date("2026-10-04T16:00:00.000Z");
+  await page.clock.setFixedTime(serverNow);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(page.getByText("北京时间 2026-10-05 00:00:00", { exact: true })).toBeVisible();
+  await expect(page.getByText(/2026-09-21 至 2026-09-27/)).toBeVisible();
+  await page.getByRole("button", { name: "回到本周" }).click();
+  await expect(page.getByText(/2026-10-05 至 2026-10-11/)).toBeVisible();
+
+  serverNow = new Date("2026-10-04T23:59:00.000Z");
+  await page.clock.setFixedTime(serverNow);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(page.getByText("北京时间 2026-10-05 07:59:00", { exact: true })).toBeVisible();
+  await expect(page.getByText("当前时段", { exact: true })).toHaveCount(0);
+
+  serverNow = new Date("2026-10-05T00:00:00.000Z");
+  await page.clock.fastForward("00:01:00");
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect(page.getByText("北京时间 2026-10-05 08:00:00", { exact: true })).toBeVisible();
+  await expect(page.locator("article").filter({ hasText: "08:00–11:00" }).getByText("当前时段", { exact: true })).toBeVisible();
 });
 
 test("delayed prior-week and prior-cell responses do not replace current view", async ({ page }) => {
@@ -92,7 +138,7 @@ test("delayed prior-week and prior-cell responses do not replace current view", 
       await hold.promise;
     }
     const slots = emptySlots();
-    slots[0].count = 1; slots[4].count = 1;
+    slots[0].count = 1; slots[SLOT_COUNT].count = 1;
     try { await route.fulfill(ok({ weekKey: requested, slots })); } catch { /* The page may have aborted the stale request. */ }
   });
   await page.route("**/api/marks/details?*", async (route) => {
@@ -118,10 +164,10 @@ test("delayed prior-week and prior-cell responses do not replace current view", 
   await expect(page.getByText(new RegExp(`${currentWeek} 至`))).toBeVisible();
   hold.resolve();
   await expect(page.getByText(new RegExp(`${currentWeek} 至`))).toBeVisible();
-  await page.getByRole("button", { name: /周一 12:00 之前.*查看详情/ }).click();
+  await page.getByRole("button", { name: /周一 08:00–11:00.*查看详情/ }).click();
   await firstCellStarted.promise;
   await page.getByRole("button", { name: "关闭详情" }).click();
-  await page.getByRole("button", { name: /周二 12:00 之前.*查看详情/ }).click();
+  await page.getByRole("button", { name: /周二 08:00–11:00.*查看详情/ }).click();
   await expect(page.getByRole("heading", { name: /周二.*登记详情/ })).toBeVisible();
   holdCell.resolve();
   await expect(page.getByRole("heading", { name: /周二.*登记详情/ })).toBeVisible();

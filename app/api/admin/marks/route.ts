@@ -41,6 +41,7 @@ export const GET = api(async (request: NextRequest) => {
     activeCount,
     state,
     nextCursor: page.hasMore && last ? encodeCursor(last.created_at, last.id) : null,
+    serverTime: new Date().toISOString(),
   });
 });
 

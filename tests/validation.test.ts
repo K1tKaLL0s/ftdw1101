@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { loginSchema, registerSchema, adminActionSchema } from "../lib/server/validation";
+import { loginSchema, registerSchema, adminActionSchema, marksWriteSchema } from "../lib/server/validation";
 import { decodeUuidCursor, encodeCursor } from "../lib/server/pagination";
+import { SCHEDULE_VERSION, SLOT_COUNT, WEEK_CELL_COUNT } from "../lib/schedule";
 
 test("new and reset passwords enforce the app's exact policy while old login passwords remain compatible", () => {
   const valid = "ABCDEFG!";
@@ -25,4 +26,25 @@ test("keyset timestamp cursors preserve PostgreSQL microseconds and timezone off
   const timestamp = "2026-09-24T00:00:00.123456+00:00";
   const encoded = encodeCursor(timestamp, "00000000-0000-4000-8000-000000000001");
   assert.equal(decodeUuidCursor(encoded)?.createdAt, timestamp);
+});
+
+test("mark validation requires the current schedule version and accepts exactly 35 cells", () => {
+  const items = Array.from({ length: WEEK_CELL_COUNT }, (_, index) => ({
+    day_index: Math.floor(index / SLOT_COUNT),
+    slot_index: index % SLOT_COUNT,
+    nickname: `player-${index}`,
+    location: "",
+  }));
+  const current = { week_key: "2026-09-21", schedule_version: SCHEDULE_VERSION, items };
+  assert.equal(marksWriteSchema.safeParse(current).success, true);
+  assert.equal(marksWriteSchema.safeParse({ ...current, items: [{ ...items[4] }] }).success, true, "slot index 4 is valid");
+  assert.equal(marksWriteSchema.safeParse({ ...current, items: [{ ...items[0], slot_index: 5 }] }).success, false);
+  assert.equal(marksWriteSchema.safeParse({ ...current, items: [...items, { ...items[0] }] }).success, false, "36 cells are rejected");
+
+  const missingVersion = marksWriteSchema.safeParse({ week_key: current.week_key, items: [items[0]] });
+  assert.equal(missingVersion.success, false, "old page requests without the version are rejected");
+  if (!missingVersion.success) assert.ok(missingVersion.error.issues.some((issue) => issue.message === "时段已更新，请刷新页面后重试。"));
+  const staleVersion = marksWriteSchema.safeParse({ ...current, schedule_version: "old-four-slot-v0", items: [items[0]] });
+  assert.equal(staleVersion.success, false);
+  if (!staleVersion.success) assert.ok(staleVersion.error.issues.some((issue) => issue.message === "时段已更新，请刷新页面后重试。"));
 });

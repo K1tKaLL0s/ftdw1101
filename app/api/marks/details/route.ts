@@ -5,6 +5,7 @@ import { rpc } from "@/lib/server/db";
 import { requireSession } from "@/lib/server/session";
 import { decodeUuidCursor, requireWeekParam } from "@/lib/server/pagination";
 import { z } from "zod";
+import { SLOT_COUNT } from "@/lib/schedule";
 
 export const dynamic = "force-dynamic";
 
@@ -18,7 +19,7 @@ export const GET = api(async (request: NextRequest) => {
   const dayValue = params.get("day");
   const slotValue = params.get("slot");
   const day = z.coerce.number().int().min(0).max(6).safeParse(dayValue);
-  const slot = z.coerce.number().int().min(0).max(3).safeParse(slotValue);
+  const slot = z.coerce.number().int().min(0).max(SLOT_COUNT - 1).safeParse(slotValue);
   if (dayValue === null || slotValue === null || !day.success || !slot.success) throw new AppError(422, "invalid_cell", "日期或时段无效。");
   const cursor = decodeUuidCursor(params.get("cursor"));
   const page = await rpc<DetailPage>("app_list_cell", {
@@ -32,5 +33,5 @@ export const GET = api(async (request: NextRequest) => {
   });
   const last = page.items.at(-1);
   const nextCursor = page.hasMore && last ? Buffer.from(last.created_at + "|" + last.id).toString("base64url") : null;
-  return json({ items: page.items, total: page.total, nextCursor });
+  return json({ items: page.items, total: page.total, nextCursor, serverTime: new Date().toISOString() });
 });

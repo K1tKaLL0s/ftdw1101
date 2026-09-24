@@ -4,11 +4,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ApiError, apiRequest, postJson } from "@/lib/api";
-import { formatWeekDay, getCurrentWeekKey, getShanghaiDateKey, shiftDayKey, shiftWeekKey } from "@/lib/week";
+import { DAY_LABELS, getCurrentSlotIndex, SLOT_COUNT, SCHEDULE_SLOTS, SCHEDULE_VERSION, WEEK_CELL_COUNT } from "@/lib/schedule";
+import { formatShanghaiClock, formatWeekDay, getCurrentWeekKey, getShanghaiDateKey, getShanghaiDayIndex, getWeekOffset, shiftDayKey, shiftWeekKey } from "@/lib/week";
+import { useScheduleClock } from "@/lib/use-schedule-clock";
 
-const DAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
-const SLOTS = ["12:00 之前", "12:00–15:00", "15:00–18:00", "18:00 之后"];
-const EMPTY_SLOTS = Array.from({ length: 28 }, (_, index) => ({ dayIndex: Math.floor(index / 4), slotIndex: index % 4, count: 0, mine: false }));
+const EMPTY_SLOTS = Array.from({ length: WEEK_CELL_COUNT }, (_, index) => ({ dayIndex: Math.floor(index / SLOT_COUNT), slotIndex: index % SLOT_COUNT, count: 0, mine: false }));
 
 type User = { id: string; username: string; isAdmin: boolean };
 type Slot = { dayIndex: number; slotIndex: number; count: number; mine: boolean };
@@ -22,11 +22,13 @@ function messageOf(error: unknown): string {
 
 export default function Home() {
   const router = useRouter();
+  const { now, initialized: clockReady, wakeVersion, calibrate } = useScheduleClock();
   const [user, setUser] = useState<User | null>(null);
   const [ready, setReady] = useState(false);
-  const [todayWeek, setTodayWeek] = useState(() => getCurrentWeekKey());
-  const [todayDate, setTodayDate] = useState(() => getShanghaiDateKey());
-  const [weekOffset, setWeekOffset] = useState(0);
+  const todayWeek = clockReady ? getCurrentWeekKey(now) : getCurrentWeekKey(new Date(0));
+  const todayDate = clockReady ? getShanghaiDateKey(now) : "";
+  const [weekKey, setWeekKey] = useState(() => getCurrentWeekKey(new Date(0)));
+  const weekOffset = getWeekOffset(todayWeek, weekKey);
   const [dayIndex, setDayIndex] = useState(0);
   const [slots, setSlots] = useState<Slot[]>(EMPTY_SLOTS);
   const [selected, setSelected] = useState<string[]>([]);
@@ -41,8 +43,9 @@ export default function Home() {
   const [online, setOnline] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
-  const weekKey = shiftWeekKey(todayWeek, weekOffset);
   const isHistorical = weekKey < todayWeek;
+  const currentSlotIndex = clockReady ? getCurrentSlotIndex(now) : -1;
+  const currentCalendarDay = clockReady ? getShanghaiDayIndex(now) : -1;
   const selectedKeys = useMemo(() => new Set(selected), [selected]);
   const slotController = useRef<AbortController | null>(null);
   const slotGeneration = useRef(0);
@@ -52,11 +55,10 @@ export default function Home() {
   const detailOpener = useRef<HTMLElement | null>(null);
   const currentWeekKey = useRef(weekKey);
   const calendarWeek = useRef(todayWeek);
+  const calendarDate = useRef(todayDate);
   const loadedStorageUser = useRef<string | null>(null);
   const formStorageKey = user ? `lai-pai-form:v1:${user.id}` : null;
-  const todayDayIndex = weekKey === todayWeek
-    ? Math.floor((Date.parse(`${todayDate}T00:00:00Z`) - Date.parse(`${weekKey}T00:00:00Z`)) / 86_400_000)
-    : -1;
+  const todayDayIndex = weekKey === todayWeek ? currentCalendarDay : -1;
 
   const handleUnauthorized = useCallback(() => {
     slotController.current?.abort();
@@ -75,7 +77,8 @@ export default function Home() {
     setSessionUnavailable(false);
     setError("");
     try {
-      const { user: currentUser } = await apiRequest<{ user: User | null }>("/api/auth/session");
+      const { user: currentUser, serverTime } = await apiRequest<{ user: User | null; serverTime?: string }>("/api/auth/session");
+      calibrate(serverTime);
       if (!currentUser) { router.replace("/login"); return; }
       setUser(currentUser);
       setReady(true);
@@ -83,26 +86,35 @@ export default function Home() {
       if (reason instanceof ApiError && reason.status === 401) handleUnauthorized();
       else { setError(messageOf(reason)); setSessionUnavailable(true); setReady(true); }
     }
-  }, [handleUnauthorized, router]);
+  }, [calibrate, handleUnauthorized, router]);
 
   useEffect(() => { const timer = window.setTimeout(() => void checkSession(), 0); return () => window.clearTimeout(timer); }, [checkSession]);
   useEffect(() => () => { slotController.current?.abort(); detailController.current?.abort(); }, []);
   useEffect(() => { currentWeekKey.current = weekKey; }, [weekKey]);
   useEffect(() => {
-    const updateCalendar = () => {
-      const nextWeek = getCurrentWeekKey();
-      const nextDate = getShanghaiDateKey();
-      if (nextWeek !== calendarWeek.current) {
-        slotController.current?.abort(); detailController.current?.abort();
-        slotGeneration.current += 1; detailGeneration.current += 1;
-        setSelected([]); setDetail(null); setSlots(EMPTY_SLOTS); setNotice("");
+    if (!clockReady) return;
+    const timer = window.setTimeout(() => {
+      const previousWeek = calendarWeek.current;
+      if (previousWeek !== todayWeek) {
+        const followingCurrentWeek = weekKey === previousWeek;
+        const offsetFromCurrent = getWeekOffset(todayWeek, weekKey);
+        const clampedWeek = offsetFromCurrent < -8 ? shiftWeekKey(todayWeek, -8) : offsetFromCurrent > 4 ? shiftWeekKey(todayWeek, 4) : null;
+        if (followingCurrentWeek || clampedWeek) {
+          slotController.current?.abort(); detailController.current?.abort();
+          slotGeneration.current += 1; detailGeneration.current += 1;
+          setSelected([]); setDetail(null); setSlots(EMPTY_SLOTS); setNotice("");
+          setWeekKey(followingCurrentWeek ? todayWeek : clampedWeek!);
+          if (followingCurrentWeek) setDayIndex(currentCalendarDay);
+        }
+        calendarWeek.current = todayWeek;
       }
-      calendarWeek.current = nextWeek;
-      setTodayWeek(nextWeek); setTodayDate(nextDate);
-    };
-    const timer = window.setInterval(updateCalendar, 60_000);
-    return () => window.clearInterval(timer);
-  }, [weekOffset]);
+      if (calendarDate.current !== todayDate) {
+        calendarDate.current = todayDate;
+        if (weekKey === todayWeek) setDayIndex(currentCalendarDay);
+      }
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [clockReady, currentCalendarDay, todayDate, todayWeek, weekKey]);
   useEffect(() => {
     const onlineHandler = () => setOnline(true);
     const offlineHandler = () => setOnline(false);
@@ -133,6 +145,7 @@ export default function Home() {
   }, [formStorageKey, location, nickname]);
 
   const loadSlots = useCallback(async (quiet = false) => {
+    if (!clockReady || weekOffset < -8 || weekOffset > 4) return;
     if (!quiet) setLoading(true);
     slotController.current?.abort();
     const controller = new AbortController();
@@ -140,19 +153,20 @@ export default function Home() {
     const generation = ++slotGeneration.current;
     const requestWeek = weekKey;
     try {
-      const result = await apiRequest<{ slots: Slot[] }>(`/api/marks?week=${encodeURIComponent(requestWeek)}`, { signal: controller.signal });
+      const result = await apiRequest<{ slots: Slot[]; serverTime?: string }>(`/api/marks?week=${encodeURIComponent(requestWeek)}`, { signal: controller.signal });
       if (generation !== slotGeneration.current || requestWeek !== currentWeekKey.current) return;
+      calibrate(result.serverTime);
       setSlots(result.slots);
       setError("");
-      setLastUpdated(new Date().toISOString());
+      if (typeof result.serverTime === "string" && Number.isFinite(Date.parse(result.serverTime))) setLastUpdated(result.serverTime);
     } catch (reason) {
       if (controller.signal.aborted) return;
       if (reason instanceof ApiError && reason.status === 401) handleUnauthorized();
       else setError(messageOf(reason));
     } finally {
-      if (generation === slotGeneration.current && !quiet) setLoading(false);
+      if (generation === slotGeneration.current) setLoading(false);
     }
-  }, [handleUnauthorized, weekKey]);
+  }, [calibrate, clockReady, handleUnauthorized, weekKey, weekOffset]);
 
   useEffect(() => {
     if (!ready || !user) return;
@@ -160,6 +174,11 @@ export default function Home() {
     const timer = window.setInterval(() => { if (document.visibilityState === "visible" && navigator.onLine) void loadSlots(true); }, 30_000);
     return () => { window.clearTimeout(initial); window.clearInterval(timer); slotController.current?.abort(); };
   }, [loadSlots, ready, user]);
+  useEffect(() => {
+    if (wakeVersion === 0 || !ready || !user || !online) return;
+    const timer = window.setTimeout(() => void loadSlots(true), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadSlots, online, ready, user, wakeVersion]);
 
   useEffect(() => {
     const element = detailDialog.current;
@@ -180,12 +199,13 @@ export default function Home() {
     setDetail(null);
   }
 
-  function changeWeekOffset(next: number) {
+  function changeWeek(next: string) {
     if (busy) return;
     slotController.current?.abort(); detailController.current?.abort();
     slotGeneration.current += 1; detailGeneration.current += 1;
     setSelected([]); setDetail(null); setSlots(EMPTY_SLOTS); setNotice("");
-    setWeekOffset(next);
+    setWeekKey(next);
+    if (next === todayWeek) setDayIndex(getShanghaiDayIndex(now));
   }
 
   async function openDetails(cell: Cell, opener?: HTMLElement) {
@@ -198,8 +218,9 @@ export default function Home() {
     setDetail({ cell, items: [], total: 0, nextCursor: null, loading: true });
     try {
       const params = new URLSearchParams({ week: requestWeek, day: String(cell.dayIndex), slot: String(cell.slotIndex) });
-      const result = await apiRequest<{ items: Mark[]; total: number; nextCursor: string | null }>(`/api/marks/details?${params}`, { signal: controller.signal });
+      const result = await apiRequest<{ items: Mark[]; total: number; nextCursor: string | null; serverTime?: string }>(`/api/marks/details?${params}`, { signal: controller.signal });
       if (generation !== detailGeneration.current || requestWeek !== currentWeekKey.current) return;
+      calibrate(result.serverTime);
       setDetail((state) => state?.cell.dayIndex === cell.dayIndex && state.cell.slotIndex === cell.slotIndex ? { ...state, ...result, loading: false } : state);
     } catch (reason) {
       if (controller.signal.aborted) return;
@@ -221,8 +242,9 @@ export default function Home() {
     const requestWeek = weekKey;
     const params = new URLSearchParams({ week: requestWeek, day: String(selectedDetail.cell.dayIndex), slot: String(selectedDetail.cell.slotIndex), cursor: nextCursor });
     try {
-      const result = await apiRequest<{ items: Mark[]; total: number; nextCursor: string | null }>(`/api/marks/details?${params}`, { signal: controller.signal });
+      const result = await apiRequest<{ items: Mark[]; total: number; nextCursor: string | null; serverTime?: string }>(`/api/marks/details?${params}`, { signal: controller.signal });
       if (generation !== detailGeneration.current || requestWeek !== currentWeekKey.current) return;
+      calibrate(result.serverTime);
       setDetail((state) => state?.cell.dayIndex === selectedDetail.cell.dayIndex && state.cell.slotIndex === selectedDetail.cell.slotIndex ? { ...state, items: [...state.items, ...result.items], total: result.total, nextCursor: result.nextCursor, loading: false } : state);
     } catch (reason) {
       if (controller.signal.aborted) return;
@@ -244,7 +266,7 @@ export default function Home() {
         const [day, slot] = key.split("-").map(Number);
         return { day_index: day, slot_index: slot, nickname, location };
       });
-      const result = await postJson<{ accepted: number; changed: number }>("/api/marks", { week_key: submittedWeek, items });
+      const result = await postJson<{ accepted: number; changed: number }>("/api/marks", { week_key: submittedWeek, schedule_version: SCHEDULE_VERSION, items });
       if (submittedWeek !== currentWeekKey.current) return;
       setNotice(result.changed === 0 ? "这些登记已是最新状态，没有需要更改的内容。" : `已保存 ${result.changed} 条登记。空场地按“皆可”保存。`);
       setSelected([]);
@@ -285,14 +307,16 @@ export default function Home() {
   }
 
   function cell(day: number, slot: number) {
-    const data = slots[day * 4 + slot] ?? EMPTY_SLOTS[day * 4 + slot];
+    const index = day * SLOT_COUNT + slot;
+    const data = slots[index] ?? EMPTY_SLOTS[index];
     const key = `${day}-${slot}`;
     const isSelected = selectedKeys.has(key);
+    const isCurrent = weekKey === todayWeek && day === todayDayIndex && slot === currentSlotIndex;
     return (
-      <td key={key} className={`border border-slate-200 p-2 align-top ${isSelected ? "bg-blue-50" : "bg-white"}`}>
+      <td key={key} className={`border p-2 align-top ${isCurrent ? "border-blue-500 bg-amber-50" : isSelected ? "border-slate-200 bg-blue-50" : "border-slate-200 bg-white"}`}>
         <div className="flex min-h-24 flex-col items-stretch gap-2">
           <button type="button" disabled={data.count === 0} onClick={(event) => void openDetails({ dayIndex: day, slotIndex: slot }, event.currentTarget)}
-            aria-label={`${DAYS[day]} ${SLOTS[slot]}，${data.count} 条登记，查看详情`}
+            aria-label={`${DAY_LABELS[day]} ${SCHEDULE_SLOTS[slot].label}，${data.count} 条登记，查看详情`}
             className="min-h-11 rounded-md bg-slate-100 px-2 text-sm font-medium text-slate-700 hover:bg-slate-200 disabled:cursor-default disabled:opacity-50">
             {data.count === 0 ? "暂无登记" : `查看 ${data.count} 条`}
           </button>
@@ -315,6 +339,7 @@ export default function Home() {
         <div>
           <p className="text-sm font-medium text-blue-700">共享登记表</p>
           <h1 className="mt-1 text-2xl font-bold tracking-tight sm:text-3xl">来牌</h1>
+          <p className="mt-1 text-sm text-slate-600" aria-label="北京时间">北京时间 {todayDate || "—"} {clockReady ? formatShanghaiClock(now) : "--:--:--"}</p>
           <p className="mt-1 text-sm text-slate-500">{weekKey} 至 {shiftDayKey(weekKey, 6)} · Asia/Shanghai 周一开始</p>
         </div>
         <nav aria-label="账户导航" className="flex flex-wrap items-center gap-2">
@@ -330,38 +355,40 @@ export default function Home() {
           <p className="text-sm text-slate-500">{isHistorical ? "历史周只可查看，不能修改登记。" : "选择时段填写登记；查看详情与选择登记分开操作。"}</p>
         </div>
         <div className="flex gap-2">
-          <button type="button" disabled={weekOffset <= -8 || busy} onClick={() => changeWeekOffset(weekOffset - 1)} className="min-h-11 rounded-lg border border-slate-300 px-4 font-medium disabled:opacity-40">上一周</button>
-          <button type="button" disabled={weekOffset >= 4 || busy} onClick={() => changeWeekOffset(weekOffset + 1)} className="min-h-11 rounded-lg border border-slate-300 px-4 font-medium disabled:opacity-40">下一周</button>
-          {weekOffset !== 0 && <button type="button" disabled={busy} onClick={() => changeWeekOffset(0)} className="min-h-11 rounded-lg bg-blue-50 px-4 font-medium text-blue-800">回到本周</button>}
+          <button type="button" disabled={weekOffset <= -8 || busy} onClick={() => changeWeek(shiftWeekKey(weekKey, -1))} className="min-h-11 rounded-lg border border-slate-300 px-4 font-medium disabled:opacity-40">上一周</button>
+          <button type="button" disabled={weekOffset >= 4 || busy} onClick={() => changeWeek(shiftWeekKey(weekKey, 1))} className="min-h-11 rounded-lg border border-slate-300 px-4 font-medium disabled:opacity-40">下一周</button>
+          {weekOffset !== 0 && <button type="button" disabled={busy} onClick={() => changeWeek(todayWeek)} className="min-h-11 rounded-lg bg-blue-50 px-4 font-medium text-blue-800">回到本周</button>}
         </div>
       </section>
 
       {!online && <p role="status" className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">当前离线，已显示最近加载的数据；网络恢复后可刷新。</p>}
-      <div className="mb-3 flex flex-wrap items-center justify-end gap-3 text-xs text-slate-500"><span>{lastUpdated ? `最近更新 ${new Intl.DateTimeFormat("zh-CN", { timeStyle: "short" }).format(new Date(lastUpdated))}` : "尚未成功刷新"}</span><button type="button" disabled={loading || !online} onClick={() => void loadSlots()} className="min-h-10 rounded-lg border border-slate-300 px-3 text-sm font-medium text-slate-700 disabled:opacity-50">{loading ? "刷新中…" : "手动刷新"}</button></div>
+      <div className="mb-3 flex flex-wrap items-center justify-end gap-3 text-xs text-slate-500"><span>{lastUpdated ? `最近更新 ${getShanghaiDateKey(new Date(lastUpdated))} ${formatShanghaiClock(new Date(lastUpdated))}（北京时间）` : "尚未成功刷新"}</span><button type="button" disabled={loading || !online} onClick={() => void loadSlots()} className="min-h-10 rounded-lg border border-slate-300 px-3 text-sm font-medium text-slate-700 disabled:opacity-50">{loading ? "刷新中…" : "手动刷新"}</button></div>
       {error && <p role="alert" className="mb-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{error}</p>}
       {notice && <p role="status" className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</p>}
 
       <section aria-label="每周可预约时间" className="mb-6 rounded-xl border border-slate-200 bg-white p-3 shadow-sm sm:p-5">
         {loading ? <p className="py-12 text-center text-slate-500">正在加载安排…</p> : <>
           <div className="hidden overflow-x-auto md:block">
-            <table className="w-full min-w-[900px] border-collapse" aria-label="本周七天四个时段登记表">
-              <thead><tr><th className="w-32 border border-slate-200 bg-slate-50 p-3 text-left text-sm">时段</th>{DAYS.map((day, index) => <th key={day} className={`border border-slate-200 p-3 text-center text-sm ${todayDayIndex === index ? "bg-blue-50 text-blue-900" : "bg-slate-50"}`}>{day}{todayDayIndex === index && <span className="ml-1 text-xs">今天</span>}<span className="mt-1 block font-normal text-slate-500">{formatWeekDay(weekKey, index)}</span></th>)}</tr></thead>
-              <tbody>{SLOTS.map((slot, slotIndex) => <tr key={slot}><th scope="row" className="border border-slate-200 bg-slate-50 p-3 text-left text-sm font-semibold">{slot}</th>{DAYS.map((_, day) => cell(day, slotIndex))}</tr>)}</tbody>
+            <table className="w-full min-w-[1050px] border-collapse" aria-label="本周七天五个时段登记表">
+              <thead><tr><th className="w-32 border border-slate-200 bg-slate-50 p-3 text-left text-sm">时段</th>{DAY_LABELS.map((day, index) => <th key={day} className={`border border-slate-200 p-3 text-center text-sm ${todayDayIndex === index ? "bg-blue-50 text-blue-900" : "bg-slate-50"}`}>{day}{todayDayIndex === index && <span className="ml-1 text-xs">今天</span>}<span className="mt-1 block font-normal text-slate-500">{formatWeekDay(weekKey, index)}</span></th>)}</tr></thead>
+              <tbody>{SCHEDULE_SLOTS.map((slot, slotIndex) => <tr key={slot.label}><th scope="row" className={`border border-slate-200 p-3 text-left text-sm font-semibold ${todayDayIndex >= 0 && slotIndex === currentSlotIndex ? "bg-amber-100 text-amber-950" : "bg-slate-50"}`}>{slot.label}{todayDayIndex >= 0 && slotIndex === currentSlotIndex && <span className="mt-1 block text-xs font-medium">当前时段</span>}</th>{DAY_LABELS.map((_, day) => cell(day, slotIndex))}</tr>)}</tbody>
             </table>
           </div>
           <div className="md:hidden">
             <div className="mb-3 grid grid-cols-4 gap-1 sm:grid-cols-7">
-              {DAYS.map((day, index) => <button key={day} type="button" aria-pressed={dayIndex === index} onClick={() => setDayIndex(index)} className={`min-h-12 rounded-lg border px-1 text-xs font-semibold ${dayIndex === index ? "border-blue-700 bg-blue-700 text-white" : todayDayIndex === index ? "border-blue-200 bg-blue-50 text-blue-900" : "border-slate-200 bg-white text-slate-700"}`}>
+              {DAY_LABELS.map((day, index) => <button key={day} type="button" aria-pressed={dayIndex === index} onClick={() => setDayIndex(index)} className={`min-h-12 rounded-lg border px-1 text-xs font-semibold ${dayIndex === index ? "border-blue-700 bg-blue-700 text-white" : todayDayIndex === index ? "border-blue-200 bg-blue-50 text-blue-900" : "border-slate-200 bg-white text-slate-700"}`}>
                 {day}{todayDayIndex === index && <span aria-label="今天"> ·</span>}<span className={`mt-0.5 block text-[11px] font-normal ${dayIndex === index ? "text-blue-100" : "text-slate-500"}`}>{formatWeekDay(weekKey, index)}</span>
               </button>)}
             </div>
             <div className="space-y-2">
-              {SLOTS.map((slot, slotIndex) => {
-                const data = slots[dayIndex * 4 + slotIndex] ?? EMPTY_SLOTS[dayIndex * 4 + slotIndex];
+              {SCHEDULE_SLOTS.map((slot, slotIndex) => {
+                const slotPosition = dayIndex * SLOT_COUNT + slotIndex;
+                const data = slots[slotPosition] ?? EMPTY_SLOTS[slotPosition];
                 const key = `${dayIndex}-${slotIndex}`;
                 const isSelected = selectedKeys.has(key);
-                return <article key={slot} className={`rounded-lg border p-3 ${isSelected ? "border-blue-400 bg-blue-50" : "border-slate-200 bg-white"}`}>
-                  <div className="mb-2 flex items-start justify-between gap-3"><h3 className="font-semibold">{slot}</h3><span className="whitespace-nowrap text-sm text-slate-500">{data.count} 条{data.mine ? " · 你已登记" : ""}</span></div>
+                const isCurrent = weekKey === todayWeek && dayIndex === todayDayIndex && slotIndex === currentSlotIndex;
+                return <article key={slot.label} className={`rounded-lg border p-3 ${isCurrent ? "border-blue-500 bg-amber-50" : isSelected ? "border-blue-400 bg-blue-50" : "border-slate-200 bg-white"}`}>
+                  <div className="mb-2 flex items-start justify-between gap-3"><h3 className="font-semibold">{slot.label}{isCurrent && <span className="ml-2 rounded bg-amber-200 px-2 py-1 text-xs text-amber-950">当前时段</span>}</h3><span className="whitespace-nowrap text-sm text-slate-500">{data.count} 条{data.mine ? " · 你已登记" : ""}</span></div>
                   <div className="grid grid-cols-2 gap-2">
                     <button type="button" disabled={data.count === 0} onClick={(event) => void openDetails({ dayIndex, slotIndex }, event.currentTarget)} className="min-h-11 rounded-md bg-slate-100 px-3 text-sm font-medium disabled:opacity-50">查看详情</button>
                     <button type="button" aria-pressed={isSelected} disabled={isHistorical || busy} onClick={() => toggleSelected(dayIndex, slotIndex)} className={`min-h-11 rounded-md border px-3 text-sm font-semibold disabled:opacity-40 ${isSelected ? "border-blue-700 bg-blue-700 text-white" : "border-blue-200 text-blue-800"}`}>{isHistorical ? "历史只读" : isSelected ? "已选择" : "选择时段"}</button>
@@ -380,7 +407,7 @@ export default function Home() {
         </div>
         {selected.length > 0 && <div className="mb-4 flex flex-wrap gap-1.5" aria-label="选择摘要">{selected.map((key) => {
           const [day, slot] = key.split("-").map(Number);
-          return <span key={key} className="rounded-full bg-blue-50 px-3 py-1 text-xs font-medium text-blue-900">{DAYS[day]} {formatWeekDay(weekKey, day)} · {SLOTS[slot]}</span>;
+          return <span key={key} className="rounded-full bg-blue-50 px-3 py-1 text-xs font-medium text-blue-900">{DAY_LABELS[day]} {formatWeekDay(weekKey, day)} · {SCHEDULE_SLOTS[slot].label}</span>;
         })}</div>}
         <form onSubmit={submitMarks} className="grid gap-3 md:grid-cols-[1fr_1.4fr_auto] md:items-end">
           <div><label htmlFor="nickname" className="mb-1.5 block text-sm font-semibold">登记昵称</label><input id="nickname" name="nickname" required maxLength={30} disabled={busy || isHistorical} value={nickname} onChange={(event) => setNickname(event.target.value)} placeholder="填写其他人能识别的昵称" className="min-h-12 w-full rounded-lg border border-slate-300 px-3 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100" /></div>
@@ -391,7 +418,7 @@ export default function Home() {
 
       {detail && <dialog ref={detailDialog} aria-labelledby="detail-title" onCancel={(event) => { event.preventDefault(); closeDetails(); }} onClick={(event) => { if (event.target === event.currentTarget) closeDetails(); }} className="fixed inset-x-0 bottom-0 top-auto m-0 max-h-[88dvh] w-full max-w-xl overflow-y-auto rounded-t-2xl border-0 bg-white p-4 shadow-xl backdrop:bg-slate-950/45 sm:inset-0 sm:m-auto sm:rounded-2xl sm:p-6">
           <div className="mb-4 flex items-start justify-between gap-3">
-            <div><h2 id="detail-title" className="text-lg font-bold">{DAYS[detail.cell.dayIndex]} {SLOTS[detail.cell.slotIndex]} 登记详情</h2><p className="mt-1 text-sm text-slate-500">{formatWeekDay(weekKey, detail.cell.dayIndex)} · 共 {detail.total} 条</p></div>
+            <div><h2 id="detail-title" className="text-lg font-bold">{DAY_LABELS[detail.cell.dayIndex]} {SCHEDULE_SLOTS[detail.cell.slotIndex].label} 登记详情</h2><p className="mt-1 text-sm text-slate-500">{formatWeekDay(weekKey, detail.cell.dayIndex)} · 共 {detail.total} 条</p></div>
             <button type="button" autoFocus onClick={closeDetails} aria-label="关闭详情" className="min-h-11 min-w-11 rounded-lg border border-slate-300 text-xl">×</button>
           </div>
           {detail.items.length === 0 && !detail.loading ? <p className="py-8 text-center text-slate-500">暂无登记。</p> : <div className="space-y-2">
