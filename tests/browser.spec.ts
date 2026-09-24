@@ -1,4 +1,6 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { createServer } from "node:http";
+import { once } from "node:events";
 import { SLOT_COUNT, WEEK_CELL_COUNT, SCHEDULE_VERSION } from "../lib/schedule";
 
 type Slot = { dayIndex: number; slotIndex: number; count: number; mine: boolean };
@@ -37,6 +39,168 @@ function deferred() {
   return { promise, resolve };
 }
 
+test("password reset inbox pagination survives a quiet refresh takeover", async ({ page }) => {
+  await page.clock.install({ time: new Date("2026-09-25T00:00:00.000Z") });
+  await page.route("**/api/auth/session", (route) => route.fulfill(ok({ user: admin })));
+  const firstNextStarted = deferred();
+  const releaseFirstNext = deferred();
+  const cursors: Array<string | null> = [];
+  let nextRequests = 0;
+  const first = { id: "aaaaaaa1-aaaa-4aaa-8aaa-aaaaaaaaaaa1", user_id: "33333333-3333-4333-8333-333333333333", username: "member_01", status: "active", requested_at: "2026-09-24T00:00:00.000Z" };
+  const last = { ...first, id: "aaaaaaa2-aaaa-4aaa-8aaa-aaaaaaaaaaa2", username: "member_31" };
+  await page.route("**/api/admin/password-reset-requests**", async (route) => {
+    const cursor = new URL(route.request().url()).searchParams.get("cursor");
+    cursors.push(cursor);
+    if (!cursor) return route.fulfill(ok({ items: [first], total: 31, nextCursor: "cursor-30" }));
+    nextRequests += 1;
+    if (nextRequests === 1) {
+      firstNextStarted.resolve();
+      await releaseFirstNext.promise;
+      try { await route.fulfill(ok({ items: [last], total: 31, nextCursor: null })); } catch { /* A newer refresh may have won the race. */ }
+      return;
+    }
+    return route.fulfill(ok({ items: [last], total: 31, nextCursor: null }));
+  });
+
+  await page.goto("/admin/password-reset-requests");
+  await expect(page.getByText("member_01", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "下一页" }).click();
+  await firstNextStarted.promise;
+  await expect(page.getByText("正在加载…")).toBeVisible();
+  await page.clock.fastForward("00:00:30");
+  await expect(page.getByText("member_31", { exact: true })).toBeVisible();
+  await expect(page.getByText("正在加载…")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "第一页" })).toBeEnabled();
+  await page.clock.fastForward(100);
+  await expect(page.getByText("member_31", { exact: true })).toBeVisible();
+  expect(cursors).toEqual([null, "cursor-30", "cursor-30"]);
+  releaseFirstNext.resolve();
+  await page.clock.fastForward(100);
+  await expect(page.getByText("member_31", { exact: true })).toBeVisible();
+});
+
+test("mark notes stay plain text and the registration controls align without responsive overflow", async ({ page }, testInfo) => {
+  await page.clock.install({ time: new Date("2026-09-25T10:00:00.000Z") });
+  let submitted: Record<string, unknown> | undefined;
+  await mockHome(page, { detailCounts: true, serverTime: () => "2026-09-25T10:00:00.000Z", onSave: async (route) => {
+    submitted = route.request().postDataJSON() as Record<string, unknown>;
+    return route.fulfill(ok({ accepted: 1, changed: 1 }));
+  } });
+  await page.route("**/api/marks?*", (route) => {
+    const slots = emptySlots().map((slot) => ({ ...slot, preview: [] as Array<{ user_id: string; nickname: string; avatar_version: number }> }));
+    slots[0].count = 1;
+    slots[0].mine = true;
+    slots[0].preview = [{ user_id: user.id, nickname: "预约者姓名预约者姓名预约者姓名预约者姓名预约者姓名预约者姓名", avatar_version: 0 }];
+    return route.fulfill(ok({ weekKey: new URL(route.request().url()).searchParams.get("week"), slots, serverTime: "2026-09-25T10:00:00.000Z" }));
+  });
+  await page.route(`**/api/users/${user.id}?*`, (route) => route.fulfill(ok({
+    user: { id: user.id, display_name: "公开昵称", avatar_version: 0 }, week_key: "2026-09-21", items: [{
+      id: "88888888-8888-4888-8888-888888888888", day_index: 0, slot_index: 0, nickname: "小林", location: "场地 A", note,
+      created_at: "2026-09-24T00:00:00.000000+00:00",
+    }],
+  })));
+  const note = '<img src=x onerror="alert(1)">\n第二行';
+  await page.route("**/api/marks/details?*", (route) => route.fulfill(ok({ items: [{
+    id: "77777777-7777-4777-8777-777777777777", user_id: user.id, nickname: "小林", location: "场地 A", note,
+    avatar_version: 0, created_at: "2026-09-24T00:00:00.000000+00:00",
+  }], total: 1, nextCursor: null })));
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "填写登记" })).toBeVisible();
+  await page.getByRole("button", { name: "选择时段" }).first().click();
+  await page.getByLabel("登记昵称").fill("小林");
+  await page.getByLabel("备注 （选填，最多 200 字）").fill(note);
+  for (const width of [390, 768, 1280]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expect(page.getByLabel("登记昵称")).toBeVisible();
+    const geometry = await page.evaluate(() => {
+      const nickname = document.querySelector<HTMLInputElement>("#nickname")!.getBoundingClientRect();
+      const location = document.querySelector<HTMLInputElement>("#location")!.getBoundingClientRect();
+      const save = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "保存登记")!.getBoundingClientRect();
+      return { width: document.documentElement.scrollWidth, viewport: window.innerWidth, nicknameBottom: nickname.bottom, locationBottom: location.bottom, saveBottom: save.bottom, saveHeight: save.height };
+    });
+    expect(geometry.width).toBe(width);
+    if (width >= 768) {
+      expect(Math.abs(geometry.nicknameBottom - geometry.locationBottom)).toBeLessThanOrEqual(1);
+      expect(Math.abs(geometry.locationBottom - geometry.saveBottom)).toBeLessThanOrEqual(1);
+      const rowButtons = await page.getByRole("table", { name: "本周七天五个时段登记表" }).locator("tbody tr").first().locator("button[aria-pressed]").evaluateAll((buttons) => buttons.map((button) => {
+        const rect = button.getBoundingClientRect();
+        return { top: rect.top, bottom: rect.bottom, height: rect.height };
+      }));
+      expect(rowButtons).toHaveLength(7);
+      expect(Math.max(...rowButtons.map((rect) => rect.height))).toBeGreaterThanOrEqual(44);
+      expect(Math.max(...rowButtons.map((rect) => rect.bottom)) - Math.min(...rowButtons.map((rect) => rect.bottom))).toBeLessThanOrEqual(1);
+    } else {
+      expect(geometry.saveHeight).toBeGreaterThanOrEqual(44);
+      const cards = page.locator('section[aria-label="每周可预约时间"] article');
+      await expect(cards).toHaveCount(5);
+      await expect(cards.filter({ hasText: "17:00–20:00" }).getByText("当前时段", { exact: true })).toBeVisible();
+      const cardGeometry = await cards.evaluateAll((elements) => elements.map((element) => {
+        const rect = element.getBoundingClientRect();
+        const buttons = [...element.querySelectorAll("button")].map((button) => button.getBoundingClientRect());
+        return { height: rect.height, buttonHeight: buttons.map((button) => button.height), buttonBottom: buttons.map((button) => button.bottom) };
+      }));
+      expect(Math.max(...cardGeometry.map((rect) => rect.height)) - Math.min(...cardGeometry.map((rect) => rect.height))).toBeLessThanOrEqual(1);
+      for (const card of cardGeometry) {
+        expect(card.buttonHeight.every((height) => height >= 44)).toBe(true);
+        expect(Math.abs(card.buttonBottom[0] - card.buttonBottom[1])).toBeLessThanOrEqual(1);
+      }
+    }
+    await page.screenshot({ path: testInfo.outputPath(`marks-note-${width}.png`), fullPage: true });
+  }
+  await page.getByRole("button", { name: "保存登记" }).click();
+  await expect(page.getByRole("status")).toContainText("已保存 1 条登记");
+  expect(submitted?.note).toBe(note);
+  expect((submitted?.items as Array<Record<string, unknown>>).every((item) => !("note" in item) && !("nickname" in item) && !("location" in item))).toBe(true);
+  await page.getByRole("button", { name: /周一 08:00–11:00.*查看详情/ }).click();
+  const detail = page.getByRole("dialog");
+  await expect(detail.locator("p").filter({ hasText: note })).toBeVisible();
+  await expect(detail.locator('img[src="x"]')).toHaveCount(0);
+  await detail.getByRole("link", { name: "查看小林的用户资料" }).click();
+  await expect(page.getByRole("heading", { name: "公开昵称" })).toBeVisible();
+  await expect(page.getByText("2026-09-21 至 2026-09-27")).toBeVisible();
+  await expect(page.locator("main").getByText(note)).toBeVisible();
+});
+
+test("one-time recovery password change shows only the two new-password fields", async ({ page }) => {
+  const recoveryUser = { ...user, mustChangePassword: false, canChangePasswordWithoutCurrent: true, displayName: "牌友", avatarVersion: 0 };
+  await page.route("**/api/auth/session", (route) => route.fulfill(ok({ user: recoveryUser, serverTime: "2026-09-25T12:00:00.000Z" })));
+  await page.route("**/api/account", (route) => route.fulfill(ok({ profile: { id: user.id, username: user.username, display_name: "牌友", avatar_version: 0, role: "user", must_change_password: false } })));
+  let submitted: Record<string, unknown> | undefined;
+  await page.route("**/api/account/password", async (route) => {
+    submitted = route.request().postDataJSON() as Record<string, unknown>;
+    return route.fulfill(ok({ ok: true, reauthenticationRequired: true }));
+  });
+  await page.goto("/account");
+  await expect(page.getByRole("heading", { name: "修改密码" })).toBeVisible();
+  await expect(page.getByLabel("当前密码")).toHaveCount(0);
+  await expect(page.getByText(/新密码至少 8 位，包含一个大写英文字母和特殊符号/).first()).toBeVisible();
+  await page.getByLabel("新密码", { exact: true }).fill("Aaaaaaaa!");
+  await page.getByLabel("确认新密码").fill("Aaaaaaaa!");
+  await page.getByRole("button", { name: "更新密码并重新登录" }).click();
+  await expect(page).toHaveURL(/\/login\?changed=1/);
+  expect(submitted).toEqual({ new_password: "Aaaaaaaa!", confirm_password: "Aaaaaaaa!" });
+});
+
+test("ordinary password change still requires and submits the current password", async ({ page }) => {
+  const ordinaryUser = { ...user, mustChangePassword: false, canChangePasswordWithoutCurrent: false, displayName: "牌友", avatarVersion: 0 };
+  await page.route("**/api/auth/session", (route) => route.fulfill(ok({ user: ordinaryUser, serverTime: "2026-09-25T12:00:00.000Z" })));
+  await page.route("**/api/account", (route) => route.fulfill(ok({ profile: { id: user.id, username: user.username, display_name: "牌友", avatar_version: 0, role: "user", must_change_password: false } })));
+  let submitted: Record<string, unknown> | undefined;
+  await page.route("**/api/account/password", async (route) => {
+    submitted = route.request().postDataJSON() as Record<string, unknown>;
+    return route.fulfill(ok({ error: { code: "invalid_fields", message: "密码更新未完成。", fields: { current_password: ["当前密码验证失败"] } } }, 422));
+  });
+  await page.goto("/account");
+  await page.getByRole("button", { name: "账号安全" }).click();
+  await expect(page.getByLabel("当前密码")).toBeVisible();
+  await page.getByLabel("当前密码").fill("OldPass!");
+  await page.getByLabel("新密码", { exact: true }).fill("Aaaaaaaa!");
+  await page.getByLabel("确认新密码").fill("Aaaaaaaa!");
+  await page.getByRole("button", { name: "更新密码并重新登录" }).click();
+  await expect(page.locator("main > p[role=\"alert\"]")).toContainText("当前密码验证失败");
+  expect(submitted).toEqual({ current_password: "OldPass!", new_password: "Aaaaaaaa!", confirm_password: "Aaaaaaaa!" });
+});
+
 test("registration shows Unicode-codepoint and backend field errors without exposing contact details", async ({ page }) => {
   await page.route("**/api/auth/register", (route) => route.fulfill(ok({ error: { code: "invalid_fields", message: "注册信息无效。", fields: { password: ["模拟后端密码错误"] } } }, 422)));
   await page.goto("/login");
@@ -55,7 +219,7 @@ test("registration shows Unicode-codepoint and backend field errors without expo
 
 test("home retains failed entry values, saves a blank location, and stays signed in after logout failure", async ({ page }) => {
   let submitted: Record<string, unknown> | undefined;
-  await mockHome(page, { onSave: async (route, count) => {
+  await mockHome(page, { serverTime: () => "2026-09-21T04:00:00.000Z", onSave: async (route, count) => {
     submitted = route.request().postDataJSON() as Record<string, unknown>;
     if (count === 1) return route.fulfill(ok({ error: { code: "invalid_fields", message: "登记有误。", fields: { items: ["场地格式需要调整"] } } }, 422));
     return route.fulfill(ok({ accepted: 1, changed: 1 }));
@@ -72,8 +236,9 @@ test("home retains failed entry values, saves a blank location, and stays signed
   await expect(page.getByRole("button", { name: "已选择" })).toBeVisible();
   await page.getByRole("button", { name: "保存登记" }).click();
   await expect(page.getByRole("status")).toContainText("已保存 1 条登记");
-  const items = submitted?.items as Array<{ nickname: string; location: string }>;
-  expect(items[0]).toMatchObject({ nickname: "小林", location: "" });
+  const items = submitted?.items as Array<{ day_index: number; slot_index: number }>;
+  expect(submitted).toMatchObject({ nickname: "小林", location: "" });
+  expect(items[0]).toEqual({ day_index: 0, slot_index: 0 });
   expect(submitted?.schedule_version).toBe(SCHEDULE_VERSION);
   await page.getByRole("button", { name: "退出" }).click();
   await expect(page.locator("main > p[role=alert]")).toContainText("logout temporarily unavailable");
@@ -91,7 +256,7 @@ test("Shanghai schedule clock follows midnight, the new week, and the 08:00 slot
   await expect(page.getByText("北京时间 2026-09-27 23:59:00", { exact: true })).toBeVisible();
   await expect(page.getByText(/2026-09-21 至 2026-09-27/)).toBeVisible();
   await expect(page.locator('button[aria-pressed="true"]').filter({ hasText: "周日" })).toBeVisible();
-  await expect(page.getByText("当前时段", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("当前时段", { exact: true }).filter({ visible: true })).toHaveCount(0);
 
   serverNow = new Date("2026-09-27T16:00:00.000Z");
   await page.clock.fastForward("00:01:00");
@@ -115,13 +280,13 @@ test("Shanghai schedule clock follows midnight, the new week, and the 08:00 slot
   await page.clock.setFixedTime(serverNow);
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await expect(page.getByText("北京时间 2026-10-05 07:59:00", { exact: true })).toBeVisible();
-  await expect(page.getByText("当前时段", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("当前时段", { exact: true }).filter({ visible: true })).toHaveCount(0);
 
   serverNow = new Date("2026-10-05T00:00:00.000Z");
   await page.clock.fastForward("00:01:00");
   await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
   await expect(page.getByText("北京时间 2026-10-05 08:00:00", { exact: true })).toBeVisible();
-  await expect(page.locator("article").filter({ hasText: "08:00–11:00" }).getByText("当前时段", { exact: true })).toBeVisible();
+  await expect(page.locator("article").filter({ hasText: "08:00–11:00" }).getByText("当前时段", { exact: true }).filter({ visible: true })).toBeVisible();
 });
 
 test("delayed prior-week and prior-cell responses do not replace current view", async ({ page }) => {
@@ -181,18 +346,18 @@ test("admin reset dialog displays backend errors, clears secrets on cancel, and 
   await page.route("**/api/admin/users/*", (route) => route.fulfill(ok({ error: { code: "invalid_fields", message: "新密码不符合要求。", fields: { password: ["需要大写字母和特殊符号"] } } }, 422)));
   await page.goto("/admin");
   await expect(page.getByRole("heading", { name: "管理员", exact: true })).toBeVisible();
-  const resetButton = page.getByRole("button", { name: "重置密码" });
+  const resetButton = page.getByRole("button", { name: "手动重置密码" });
   await resetButton.click();
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
-  await page.getByLabel("新密码").fill("A!123456");
+  await page.getByLabel("新密码", { exact: true }).fill("A!123456");
   await page.getByLabel("操作原因（必填）").fill("用户申请重置");
-  await page.getByRole("button", { name: "确认重置密码" }).click();
+  await page.getByRole("button", { name: "确认手动重置密码" }).click();
   await expect(dialog.getByRole("alert")).toContainText("需要大写字母和特殊符号");
   await dialog.getByRole("button", { name: "关闭确认框" }).click();
   await expect(resetButton).toBeFocused();
   await resetButton.click();
-  await expect(page.getByLabel("新密码")).toHaveValue("");
+  await expect(page.getByLabel("新密码", { exact: true })).toHaveValue("");
 });
 
 test("admin restores a record on page two after more than 30 deleted records", async ({ page }) => {
@@ -267,9 +432,47 @@ test("real Next HTTP handlers enforce origin, body size, authentication, cookies
   expect(privateRead.status()).toBe(401);
   const adminRead = await request.get("/api/admin/users");
   expect(adminRead.status()).toBe(401);
+  const defaultAvatar = await request.get("/default-avatar.svg");
+  expect(defaultAvatar.status()).toBe(200);
+  expect(await defaultAvatar.text()).toContain("来牌");
   const session = await request.get("/api/auth/session");
   expect(session.status()).toBe(200);
   expect(session.headers()["cache-control"]).toContain("no-store");
   expect((await session.json()).user).toBeNull();
   expect(session.headers()["set-cookie"]).toContain("HttpOnly");
+});
+
+test("the live BFF rejects must-change sessions before calling any business RPC", async ({ request }) => {
+  const rpcCalls: string[] = [];
+  const fakeSupabase = createServer((incoming, response) => {
+    const path = new URL(incoming.url ?? "/", "http://localhost").pathname;
+    const rpcName = path.split("/").at(-1) ?? "";
+    rpcCalls.push(rpcName);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(rpcName === "app_get_session_context" ? [{
+      user_id: admin.id,
+      username: admin.username,
+      is_admin: true,
+      auth_email: "admin@example.invalid",
+      auth_epoch: 3,
+      must_change_password: true,
+      display_name: "",
+      avatar_version: 0,
+      can_change_password_without_current: false,
+      expires_at: "2099-01-01T00:00:00.000Z",
+    }] : []));
+  });
+  fakeSupabase.listen(54321, "localhost");
+  await once(fakeSupabase, "listening");
+  try {
+    const cookie = `lai_pai_session=${"S".repeat(43)}`;
+    for (const path of ["/api/marks?week=2026-09-21", "/api/admin/users"]) {
+      const response = await request.get(path, { headers: { cookie } });
+      expect(response.status()).toBe(403);
+      expect((await response.json()).error.code).toBe("password_change_required");
+    }
+    expect(rpcCalls).toEqual(["app_get_session_context", "app_get_session_context"]);
+  } finally {
+    await new Promise<void>((resolve, reject) => fakeSupabase.close((error) => error ? reject(error) : resolve()));
+  }
 });

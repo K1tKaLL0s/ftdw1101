@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 
 type DeletedMark = {
   id: string; user_id: string; username: string; day_index: number; slot_index: number;
-  nickname: string; location: string; created_at: string; deleted_at: string;
+  nickname: string; location: string; note: string; created_at: string; deleted_at: string;
 };
 type Page = { items: DeletedMark[]; total: number; hasMore: boolean };
 

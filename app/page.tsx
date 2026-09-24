@@ -7,12 +7,14 @@ import { ApiError, apiRequest, postJson } from "@/lib/api";
 import { DAY_LABELS, getCurrentSlotIndex, SLOT_COUNT, SCHEDULE_SLOTS, SCHEDULE_VERSION, WEEK_CELL_COUNT } from "@/lib/schedule";
 import { formatShanghaiClock, formatWeekDay, getCurrentWeekKey, getShanghaiDateKey, getShanghaiDayIndex, getWeekOffset, shiftDayKey, shiftWeekKey } from "@/lib/week";
 import { useScheduleClock } from "@/lib/use-schedule-clock";
+import { UserAvatar } from "@/components/user-avatar";
 
-const EMPTY_SLOTS = Array.from({ length: WEEK_CELL_COUNT }, (_, index) => ({ dayIndex: Math.floor(index / SLOT_COUNT), slotIndex: index % SLOT_COUNT, count: 0, mine: false }));
+type Preview = { user_id: string; nickname: string; avatar_version: number };
+const EMPTY_SLOTS = Array.from({ length: WEEK_CELL_COUNT }, (_, index) => ({ dayIndex: Math.floor(index / SLOT_COUNT), slotIndex: index % SLOT_COUNT, count: 0, mine: false, preview: [] as Preview[] }));
 
-type User = { id: string; username: string; isAdmin: boolean };
-type Slot = { dayIndex: number; slotIndex: number; count: number; mine: boolean };
-type Mark = { id: string; user_id: string; nickname: string; location: string; created_at: string };
+type User = { id: string; username: string; isAdmin: boolean; mustChangePassword?: boolean; displayName?: string; avatarVersion?: number };
+type Slot = { dayIndex: number; slotIndex: number; count: number; mine: boolean; preview: Preview[] };
+type Mark = { id: string; user_id: string; nickname: string; location: string; note: string; avatar_version: number; created_at: string };
 type Cell = { dayIndex: number; slotIndex: number };
 type DetailState = { cell: Cell; items: Mark[]; total: number; nextCursor: string | null; loading: boolean };
 
@@ -34,6 +36,8 @@ export default function Home() {
   const [selected, setSelected] = useState<string[]>([]);
   const [nickname, setNickname] = useState("");
   const [location, setLocation] = useState("");
+  const [note, setNote] = useState("");
+  const [pendingRequests, setPendingRequests] = useState(0);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState("");
@@ -80,6 +84,7 @@ export default function Home() {
       const { user: currentUser, serverTime } = await apiRequest<{ user: User | null; serverTime?: string }>("/api/auth/session");
       calibrate(serverTime);
       if (!currentUser) { router.replace("/login"); return; }
+      if (currentUser.mustChangePassword) { router.replace("/account?section=security"); return; }
       setUser(currentUser);
       setReady(true);
     } catch (reason) {
@@ -130,9 +135,10 @@ export default function Home() {
       try {
         const saved = localStorage.getItem(formStorageKey);
         if (saved) {
-          const values = JSON.parse(saved) as { nickname?: string; location?: string };
+          const values = JSON.parse(saved) as { nickname?: string; location?: string; note?: string };
           setNickname(typeof values.nickname === "string" ? values.nickname : "");
           setLocation(typeof values.location === "string" ? values.location : "");
+          setNote(typeof values.note === "string" ? values.note : "");
         }
       } catch { /* Continue with empty form if local storage is unavailable. */ }
       loadedStorageUser.current = id;
@@ -141,8 +147,20 @@ export default function Home() {
   }, [formStorageKey]);
   useEffect(() => {
     if (!formStorageKey || loadedStorageUser.current !== formStorageKey.slice("lai-pai-form:v1:".length)) return;
-    try { localStorage.setItem(formStorageKey, JSON.stringify({ nickname, location })); } catch { /* Browser storage may be disabled. */ }
-  }, [formStorageKey, location, nickname]);
+    try { localStorage.setItem(formStorageKey, JSON.stringify({ nickname, location, note })); } catch { /* Browser storage may be disabled. */ }
+  }, [formStorageKey, location, nickname, note]);
+
+  useEffect(() => {
+    if (!ready || !user?.isAdmin) return;
+    const refresh = () => {
+      if (document.visibilityState !== "visible" || !navigator.onLine) return;
+      void apiRequest<{ total: number }>("/api/admin/password-reset-requests")
+        .then((result) => setPendingRequests(result.total)).catch(() => {});
+    };
+    const initial = window.setTimeout(refresh, 0);
+    const interval = window.setInterval(refresh, 30_000);
+    return () => { window.clearTimeout(initial); window.clearInterval(interval); };
+  }, [ready, user]);
 
   const loadSlots = useCallback(async (quiet = false) => {
     if (!clockReady || weekOffset < -8 || weekOffset > 4) return;
@@ -156,7 +174,7 @@ export default function Home() {
       const result = await apiRequest<{ slots: Slot[]; serverTime?: string }>(`/api/marks?week=${encodeURIComponent(requestWeek)}`, { signal: controller.signal });
       if (generation !== slotGeneration.current || requestWeek !== currentWeekKey.current) return;
       calibrate(result.serverTime);
-      setSlots(result.slots);
+      setSlots(result.slots.map((slot) => ({ ...slot, preview: Array.isArray(slot.preview) ? slot.preview.slice(0, 3) : [] })));
       setError("");
       if (typeof result.serverTime === "string" && Number.isFinite(Date.parse(result.serverTime))) setLastUpdated(result.serverTime);
     } catch (reason) {
@@ -264,9 +282,9 @@ export default function Home() {
     try {
       const items = selected.map((key) => {
         const [day, slot] = key.split("-").map(Number);
-        return { day_index: day, slot_index: slot, nickname, location };
+        return { day_index: day, slot_index: slot };
       });
-      const result = await postJson<{ accepted: number; changed: number }>("/api/marks", { week_key: submittedWeek, schedule_version: SCHEDULE_VERSION, items });
+      const result = await postJson<{ accepted: number; changed: number }>("/api/marks", { week_key: submittedWeek, schedule_version: SCHEDULE_VERSION, nickname, location, note, items });
       if (submittedWeek !== currentWeekKey.current) return;
       setNotice(result.changed === 0 ? "这些登记已是最新状态，没有需要更改的内容。" : `已保存 ${result.changed} 条登记。空场地按“皆可”保存。`);
       setSelected([]);
@@ -320,11 +338,15 @@ export default function Home() {
             className="min-h-11 rounded-md bg-slate-100 px-2 text-sm font-medium text-slate-700 hover:bg-slate-200 disabled:cursor-default disabled:opacity-50">
             {data.count === 0 ? "暂无登记" : `查看 ${data.count} 条`}
           </button>
+          <div className="flex min-h-8 min-w-0 items-center gap-1 overflow-hidden" aria-label="预约者预览">
+            {data.preview.slice(0, 3).map((member) => <Link key={member.user_id} href={`/users/${member.user_id}?week=${encodeURIComponent(weekKey)}`} title={member.nickname} className="inline-flex min-w-0 items-center gap-1 rounded-full bg-slate-50 pr-2 text-xs hover:bg-blue-50"><UserAvatar userId={member.user_id} version={member.avatar_version} name={member.nickname} size={24} /><span className="max-w-20 truncate">{member.nickname}</span></Link>)}
+            {data.preview.length === 0 && <span aria-hidden="true" className="invisible text-xs">预约者预览</span>}
+          </div>
           <button type="button" aria-pressed={isSelected} disabled={isHistorical || busy} onClick={() => toggleSelected(day, slot)}
             className={`min-h-11 rounded-md border px-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${isSelected ? "border-blue-700 bg-blue-700 text-white" : "border-blue-200 bg-white text-blue-800 hover:bg-blue-50"}`}>
             {isHistorical ? "历史只读" : isSelected ? "已选择" : "选择时段"}
           </button>
-          {data.mine && <span className="text-center text-xs text-emerald-700">你已登记</span>}
+          <span className="min-h-4 text-center text-xs text-emerald-700">{data.mine ? "你已登记" : " "}</span>
         </div>
       </td>
     );
@@ -343,8 +365,9 @@ export default function Home() {
           <p className="mt-1 text-sm text-slate-500">{weekKey} 至 {shiftDayKey(weekKey, 6)} · Asia/Shanghai 周一开始</p>
         </div>
         <nav aria-label="账户导航" className="flex flex-wrap items-center gap-2">
-          <span className="mr-1 rounded-full bg-slate-100 px-3 py-2 text-sm font-medium">{user.username}{user.isAdmin ? " · 管理员" : ""}</span>
+          <Link href="/account" className="mr-1 inline-flex min-h-11 items-center gap-2 rounded-full bg-slate-100 py-1 pl-1 pr-3 text-sm font-medium"><UserAvatar userId={user.id} version={user.avatarVersion ?? 0} name={user.displayName || user.username} size={36} /><span className="max-w-36 truncate">{user.displayName || user.username}{user.isAdmin ? " · 管理员" : ""}</span></Link>
           {user.isAdmin && <Link href="/admin" className="min-h-11 rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold hover:bg-slate-50">管理</Link>}
+          {user.isAdmin && <Link href="/admin/password-reset-requests" className="min-h-11 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm font-semibold text-amber-900">站内申请{pendingRequests > 0 ? ` · ${pendingRequests}` : ""}</Link>}
           <button type="button" disabled={loggingOut} onClick={() => void signOut()} className="min-h-11 rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold hover:bg-slate-50 disabled:opacity-50">{loggingOut ? "正在退出…" : "退出"}</button>
         </nav>
       </header>
@@ -387,8 +410,10 @@ export default function Home() {
                 const key = `${dayIndex}-${slotIndex}`;
                 const isSelected = selectedKeys.has(key);
                 const isCurrent = weekKey === todayWeek && dayIndex === todayDayIndex && slotIndex === currentSlotIndex;
-                return <article key={slot.label} className={`rounded-lg border p-3 ${isCurrent ? "border-blue-500 bg-amber-50" : isSelected ? "border-blue-400 bg-blue-50" : "border-slate-200 bg-white"}`}>
-                  <div className="mb-2 flex items-start justify-between gap-3"><h3 className="font-semibold">{slot.label}{isCurrent && <span className="ml-2 rounded bg-amber-200 px-2 py-1 text-xs text-amber-950">当前时段</span>}</h3><span className="whitespace-nowrap text-sm text-slate-500">{data.count} 条{data.mine ? " · 你已登记" : ""}</span></div>
+                return <article key={slot.label} className={`grid min-w-0 grid-rows-[auto_auto_auto_auto] gap-2 rounded-lg border p-3 ${isCurrent ? "border-blue-500 bg-amber-50" : isSelected ? "border-blue-400 bg-blue-50" : "border-slate-200 bg-white"}`}>
+                  <div className="flex min-h-8 items-start justify-between gap-3"><h3 className="min-w-0 break-words font-semibold">{slot.label}</h3><span className={`shrink-0 rounded px-2 py-1 text-xs ${isCurrent ? "bg-amber-200 text-amber-950" : "invisible"}`}>当前时段</span></div>
+                  <div className="flex min-h-6 items-center justify-between gap-2"><span className="whitespace-nowrap text-sm text-slate-500">{data.count} 条</span><span className="min-h-4 text-xs text-emerald-700">{data.mine ? "你已登记" : " "}</span></div>
+                  <div className="flex min-h-8 min-w-0 items-center gap-1 overflow-hidden">{data.preview.slice(0, 3).map((member) => <Link key={member.user_id} href={`/users/${member.user_id}?week=${encodeURIComponent(weekKey)}`} title={member.nickname} className="inline-flex min-w-0 items-center gap-1 rounded-full bg-slate-50 pr-2 text-xs"><UserAvatar userId={member.user_id} version={member.avatar_version} name={member.nickname} size={24} /><span className="max-w-20 truncate">{member.nickname}</span></Link>)}{data.preview.length === 0 && <span className="invisible text-xs">预约者预览</span>}</div>
                   <div className="grid grid-cols-2 gap-2">
                     <button type="button" disabled={data.count === 0} onClick={(event) => void openDetails({ dayIndex, slotIndex }, event.currentTarget)} className="min-h-11 rounded-md bg-slate-100 px-3 text-sm font-medium disabled:opacity-50">查看详情</button>
                     <button type="button" aria-pressed={isSelected} disabled={isHistorical || busy} onClick={() => toggleSelected(dayIndex, slotIndex)} className={`min-h-11 rounded-md border px-3 text-sm font-semibold disabled:opacity-40 ${isSelected ? "border-blue-700 bg-blue-700 text-white" : "border-blue-200 text-blue-800"}`}>{isHistorical ? "历史只读" : isSelected ? "已选择" : "选择时段"}</button>
@@ -409,10 +434,12 @@ export default function Home() {
           const [day, slot] = key.split("-").map(Number);
           return <span key={key} className="rounded-full bg-blue-50 px-3 py-1 text-xs font-medium text-blue-900">{DAY_LABELS[day]} {formatWeekDay(weekKey, day)} · {SCHEDULE_SLOTS[slot].label}</span>;
         })}</div>}
-        <form onSubmit={submitMarks} className="grid gap-3 md:grid-cols-[1fr_1.4fr_auto] md:items-end">
-          <div><label htmlFor="nickname" className="mb-1.5 block text-sm font-semibold">登记昵称</label><input id="nickname" name="nickname" required maxLength={30} disabled={busy || isHistorical} value={nickname} onChange={(event) => setNickname(event.target.value)} placeholder="填写其他人能识别的昵称" className="min-h-12 w-full rounded-lg border border-slate-300 px-3 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100" /></div>
-          <div><label htmlFor="location" className="mb-1.5 block text-sm font-semibold">所在场地 <span className="font-normal text-slate-500">（选填）</span></label><input id="location" name="location" maxLength={100} disabled={busy || isHistorical} value={location} onChange={(event) => setLocation(event.target.value)} aria-describedby="location-help" placeholder="留空表示场地皆可" className="min-h-12 w-full rounded-lg border border-slate-300 px-3 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100" /><p id="location-help" className="mt-1 text-xs text-slate-500">场地可以留空，保存后显示“皆可”。长场地名称会自动换行。</p></div>
-          <button disabled={busy || isHistorical || selected.length === 0} className="min-h-12 rounded-lg bg-blue-700 px-6 font-semibold text-white hover:bg-blue-800 disabled:opacity-60">{busy ? "正在保存…" : "保存登记"}</button>
+        <form onSubmit={submitMarks} className="grid gap-x-3 gap-y-1 md:grid-cols-[1fr_1.4fr_auto]">
+          <div className="min-w-0"><label htmlFor="nickname" className="mb-1.5 block min-h-6 text-sm font-semibold">登记昵称</label><input id="nickname" name="nickname" required maxLength={30} disabled={busy || isHistorical} value={nickname} onChange={(event) => setNickname(event.target.value)} placeholder="填写其他人能识别的昵称" className="min-h-12 w-full rounded-lg border border-slate-300 px-3 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100" /></div>
+          <div className="min-w-0"><label htmlFor="location" className="mb-1.5 block min-h-6 text-sm font-semibold">所在场地 <span className="font-normal text-slate-500">（选填）</span></label><input id="location" name="location" maxLength={100} disabled={busy || isHistorical} value={location} onChange={(event) => setLocation(event.target.value)} aria-describedby="location-help" placeholder="留空表示场地皆可" className="min-h-12 w-full rounded-lg border border-slate-300 px-3 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100" /></div>
+          <button disabled={busy || isHistorical || selected.length === 0} className="min-h-12 self-end rounded-lg bg-blue-700 px-6 font-semibold text-white hover:bg-blue-800 disabled:opacity-60">{busy ? "正在保存…" : "保存登记"}</button>
+          <p className="min-w-0 break-words text-xs text-slate-500">昵称会展示给已登录用户。</p><p id="location-help" className="min-w-0 break-words text-xs text-slate-500">场地可留空表示“皆可”；长名称会换行。</p><span aria-hidden="true" className="hidden md:block" />
+          <div className="min-w-0 md:col-span-3"><label htmlFor="mark-note" className="mb-1 block text-sm font-semibold">备注 <span className="font-normal text-slate-500">（选填，最多 200 字）</span></label><textarea id="mark-note" maxLength={200} rows={3} disabled={busy || isHistorical} value={note} onChange={(event) => setNote(event.target.value)} className="w-full resize-y rounded-lg border border-slate-300 p-3 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100" placeholder="补充时间、位置或其他需要说明的情况" /></div>
         </form>
       </section>
 
@@ -423,7 +450,7 @@ export default function Home() {
           </div>
           {detail.items.length === 0 && !detail.loading ? <p className="py-8 text-center text-slate-500">暂无登记。</p> : <div className="space-y-2">
             {detail.items.map((mark) => <article key={mark.id} className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
-              <div className="min-w-0"><h3 className="break-words font-semibold">{mark.nickname}</h3><p className="mt-1 break-words text-sm text-slate-600">场地：{mark.location?.trim() || "皆可"}</p></div>
+              <div className="flex min-w-0 items-start gap-3"><Link href={`/users/${mark.user_id}?week=${encodeURIComponent(weekKey)}`} aria-label={`查看${mark.nickname}的用户资料`}><UserAvatar userId={mark.user_id} version={mark.avatar_version} name={mark.nickname} size={42} /></Link><div className="min-w-0"><Link href={`/users/${mark.user_id}?week=${encodeURIComponent(weekKey)}`} className="break-words font-semibold text-blue-800 hover:underline">{mark.nickname}</Link><p className="mt-1 break-words text-sm text-slate-600">场地：{mark.location?.trim() || "皆可"}</p>{mark.note && <p className="mt-1 whitespace-pre-wrap break-words text-sm text-slate-700">备注：{mark.note}</p>}</div></div>
               {mark.user_id === user.id && !isHistorical && <button type="button" onClick={() => void deleteMark(mark)} className="min-h-11 shrink-0 rounded-lg border border-rose-200 px-3 text-sm font-semibold text-rose-800 hover:bg-rose-50">删除</button>}
             </article>)}
           </div>}

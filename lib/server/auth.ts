@@ -5,6 +5,7 @@ import { issueAppSession } from "./session";
 
 type AuthIdentity = { user_id: string; auth_email: string; auth_epoch: number };
 type AuthIdentityRow = AuthIdentity;
+const DEFAULT_RESET_PASSWORD = "Cz@13456";
 
 function isDuplicateAccount(message: string): boolean {
   const value = message.toLowerCase();
@@ -90,5 +91,30 @@ export async function updateAuthPassword(userId: string, password: string): Prom
     return "unknown";
   } catch {
     return "unknown";
+  }
+}
+
+export function updateAuthPasswordToDefault(userId: string): Promise<PasswordChangeOutcome> {
+  return updateAuthPassword(userId, DEFAULT_RESET_PASSWORD);
+}
+
+export type CurrentPasswordOutcome = "valid" | "invalid" | "unavailable";
+
+export async function verifyCurrentPassword(userId: string, email: string, password: string): Promise<CurrentPasswordOutcome> {
+  const client = createRequestAuthClient();
+  try {
+    const { data, error } = await client.auth.signInWithPassword({ email, password });
+    if (error) {
+      const status = error.status ?? 500;
+      if (status === 429) return "unavailable";
+      if (status >= 500 || status <= 0) return "unavailable";
+      return "invalid";
+    }
+    if (!data.user || data.user.id !== userId || !data.session) return "invalid";
+    const { error: signOutError } = await client.auth.signOut({ scope: "local" });
+    if (signOutError) return "unavailable";
+    return "valid";
+  } catch {
+    return "unavailable";
   }
 }

@@ -9,7 +9,8 @@ import { SLOT_COUNT, WEEK_CELL_COUNT, SCHEDULE_VERSION } from "@/lib/schedule";
 
 export const dynamic = "force-dynamic";
 
-type SlotRow = { day_index: number; slot_index: number; mark_count: number; mine: boolean };
+type Preview = { user_id: string; nickname: string; avatar_version: number };
+type SlotRow = { day_index: number; slot_index: number; mark_count: number; mine: boolean; preview: Preview[] };
 type SavedMarks = { accepted: number; changed: number; week_key: string; week_end: string };
 
 export const GET = api(async (request: NextRequest) => {
@@ -21,7 +22,7 @@ export const GET = api(async (request: NextRequest) => {
     const dayIndex = Math.floor(index / SLOT_COUNT);
     const slotIndex = index % SLOT_COUNT;
     const row = lookup.get(dayIndex + "-" + slotIndex);
-    return { dayIndex, slotIndex, count: row?.mark_count ?? 0, mine: row?.mine ?? false };
+    return { dayIndex, slotIndex, count: row?.mark_count ?? 0, mine: row?.mine ?? false, preview: row?.preview ?? [] };
   });
   return json({ weekKey: week, slots, serverTime: new Date().toISOString() });
 });
@@ -33,9 +34,10 @@ export const POST = api(async (request: NextRequest) => {
   await consumeRateLimits([
     { key: "account:" + session.id + ":write", limit: 60, windowSeconds: 60 },
   ]);
-  const result = await rpc<SavedMarks>("app_upsert_marks", {
+  const result = await rpc<SavedMarks>("app_upsert_marks_with_note", {
     p_session_hash: tokenHash,
     p_week_key: input.week_key,
+    p_note: input.note ?? null,
     p_items: input.items.map((item) => ({
       day_index: item.day_index,
       slot_index: item.slot_index,

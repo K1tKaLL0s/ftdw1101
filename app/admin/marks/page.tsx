@@ -8,7 +8,7 @@ import { DAY_LABELS, getCurrentSlotIndex, SCHEDULE_SLOTS } from "@/lib/schedule"
 import { formatShanghaiClock, formatWeekDay, getCurrentWeekKey, getShanghaiDateKey, getWeekOffset, shiftDayKey, shiftWeekKey } from "@/lib/week";
 import { useScheduleClock } from "@/lib/use-schedule-clock";
 
-type Mark = { id: string; user_id: string; username: string; day_index: number; slot_index: number; nickname: string; location: string; created_at: string; deleted_at: string | null };
+type Mark = { id: string; user_id: string; username: string; day_index: number; slot_index: number; nickname: string; location: string; note: string; created_at: string; deleted_at: string | null };
 type WeekData = { items: Mark[]; total: number; activeCount: number; nextCursor: string | null; state: "active" | "deleted" };
 type View = "active" | "deleted";
 type Pending = { action: "delete_marks" | "restore_marks" | "clear_week"; week: string; count: number; ids: string[] };
@@ -76,9 +76,10 @@ export default function AdminMarksPage() {
     setLoading(true);
     setError("");
     try {
-      const session = await apiRequest<{ user: { isAdmin: boolean } | null; serverTime?: string }>("/api/auth/session", { signal: controller.signal });
+      const session = await apiRequest<{ user: { isAdmin: boolean; mustChangePassword: boolean } | null; serverTime?: string }>("/api/auth/session", { signal: controller.signal });
       calibrate(session.serverTime);
       if (!session.user) { router.replace("/login"); return; }
+      if (session.user.mustChangePassword) { router.replace("/account?section=security"); return; }
       if (!session.user.isAdmin) { router.replace("/"); return; }
       const params = new URLSearchParams({ week: requestWeek, state: requestView });
       if (selectedCursor) params.set("cursor", selectedCursor);
@@ -189,7 +190,7 @@ export default function AdminMarksPage() {
       {view === "active" && <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-rose-50/60 p-3"><p className="text-sm font-medium text-rose-900">本周准确总数：{data.activeCount} 条</p><button type="button" disabled={loading || busy || isHistorical || data.activeCount === 0} onClick={(event) => openPending({ action: "clear_week", week, count: data.activeCount, ids: [] }, event.currentTarget)} className="min-h-11 rounded-lg bg-rose-700 px-4 text-sm font-semibold text-white disabled:opacity-40">清空本周登记</button></div>}
 
       {loading ? <p className="p-8 text-center text-slate-500">正在加载…</p> : data.items.length === 0 ? <p className="p-8 text-center text-slate-500">这一周没有{view === "active" ? "未删除" : "已删除"}登记。</p> : <div className="divide-y divide-slate-100">
-        {data.items.map((mark) => <label key={mark.id} className="flex min-h-16 cursor-pointer items-start gap-3 p-4 hover:bg-slate-50"><input type="checkbox" checked={selected.includes(mark.id)} disabled={busy || (view === "active" && isHistorical)} onChange={(event) => setSelected((old) => event.target.checked ? [...old, mark.id] : old.filter((id) => id !== mark.id))} className="mt-1 h-5 w-5 shrink-0 accent-blue-700" /><span className="min-w-0 flex-1"><span className="flex flex-wrap items-center gap-x-2 gap-y-1"><strong className="break-all">{mark.nickname}</strong><span className="text-sm text-slate-600">{mark.username}</span><span className="text-sm text-slate-500">{DAY_LABELS[mark.day_index]} {formatWeekDay(week, mark.day_index)} · {SCHEDULE_SLOTS[mark.slot_index]?.label ?? "时段未知"}</span></span><span className="mt-1 block break-words text-sm text-slate-600">场地：{mark.location || "皆可"}</span></span></label>)}
+        {data.items.map((mark) => <label key={mark.id} className="flex min-h-16 cursor-pointer items-start gap-3 p-4 hover:bg-slate-50"><input type="checkbox" checked={selected.includes(mark.id)} disabled={busy || (view === "active" && isHistorical)} onChange={(event) => setSelected((old) => event.target.checked ? [...old, mark.id] : old.filter((id) => id !== mark.id))} className="mt-1 h-5 w-5 shrink-0 accent-blue-700" /><span className="min-w-0 flex-1"><span className="flex flex-wrap items-center gap-x-2 gap-y-1"><strong className="break-all">{mark.nickname}</strong><span className="text-sm text-slate-600">{mark.username}</span><span className="text-sm text-slate-500">{DAY_LABELS[mark.day_index]} {formatWeekDay(week, mark.day_index)} · {SCHEDULE_SLOTS[mark.slot_index]?.label ?? "时段未知"}</span></span><span className="mt-1 block break-words text-sm text-slate-600">场地：{mark.location || "皆可"}</span>{mark.note && <span className="mt-1 block whitespace-pre-wrap break-words text-sm text-slate-700">备注：{mark.note}</span>}</span></label>)}
       </div>}
 
       <div className="flex items-center justify-between border-t border-slate-200 p-3"><button type="button" disabled={!cursor || loading} onClick={() => void load(null)} className="min-h-11 rounded-lg px-4 text-sm font-semibold text-blue-800 disabled:opacity-40">第一页</button><button type="button" disabled={!nextCursor || loading} onClick={() => nextCursor && void load(nextCursor)} className="min-h-11 rounded-lg px-4 text-sm font-semibold text-blue-800 disabled:opacity-40">加载更多</button></div>

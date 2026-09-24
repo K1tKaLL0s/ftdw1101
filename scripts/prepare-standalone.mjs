@@ -9,3 +9,10 @@ if (!existsSync(source)) {
 }
 mkdirSync(dirname(destination), { recursive: true });
 cpSync(source, destination, { recursive: true, force: true });
+
+const publicSource = resolve("public");
+const publicDestination = resolve(".next/standalone/public");
+if (existsSync(publicSource)) {
+  mkdirSync(dirname(publicDestination), { recursive: true });
+  cpSync(publicSource, publicDestination, { recursive: true, force: true });
+}

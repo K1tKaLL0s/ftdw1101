@@ -7,11 +7,11 @@ import { ApiError, apiRequest, postJson } from "@/lib/api";
 
 type User = { id: string; username: string; role: "user" | "admin"; status: "active" | "banned" | "deleted" | "reset_pending"; created_at: string; deleted_at: string | null; active_marks: number };
 type Audit = { id: number; actor_username: string | null; target_username: string | null; action: string; reason: string; affected_count: number; created_at: string };
-type Action = "ban" | "unban" | "delete" | "restore" | "promote_admin" | "demote_admin" | "reset_password";
+type Action = "ban" | "unban" | "delete" | "restore" | "promote_admin" | "demote_admin" | "reset_password" | "reset_default_password";
 type Pending = { user: User; action: Action };
 
 const STATUS: Record<User["status"], string> = { active: "正常", banned: "已封禁", deleted: "已软删除", reset_pending: "重置待确认" };
-const ACTION_LABEL: Record<Action, string> = { ban: "封禁账号", unban: "解除封禁", delete: "软删除账号", restore: "恢复账号", promote_admin: "设为管理员", demote_admin: "取消管理员", reset_password: "重置密码" };
+const ACTION_LABEL: Record<Action, string> = { ban: "封禁账号", unban: "解除封禁", delete: "软删除账号", restore: "恢复账号", promote_admin: "设为管理员", demote_admin: "取消管理员", reset_password: "手动重置密码", reset_default_password: "重置为默认密码" };
 
 function explain(error: unknown) { return error instanceof ApiError ? error.message : "服务暂时不可用，请稍后重试。"; }
 function formatDate(value: string) { return new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)); }
@@ -25,6 +25,7 @@ export default function AdminPage() {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [auditCursor, setAuditCursor] = useState<string | null>(null);
   const [total, setTotal] = useState(0);
+  const [pendingRequests, setPendingRequests] = useState(0);
   const [pending, setPending] = useState<Pending | null>(null);
   const [reason, setReason] = useState("");
   const [password, setPassword] = useState("");
@@ -46,14 +47,16 @@ export default function AdminPage() {
     setLoading(true);
     setError("");
     try {
-      const [session, userPage, auditPage] = await Promise.all([
-        apiRequest<{ user: { id: string; isAdmin: boolean } | null }>("/api/auth/session", { signal: controller.signal }),
+      const session = await apiRequest<{ user: { id: string; isAdmin: boolean; mustChangePassword: boolean } | null }>("/api/auth/session", { signal: controller.signal });
+      if (generation !== loadGeneration.current) return;
+      if (!session.user) { router.replace("/login"); return; }
+      if (session.user.mustChangePassword) { router.replace("/account?section=security"); return; }
+      if (!session.user.isAdmin) { router.replace("/"); return; }
+      const [userPage, auditPage] = await Promise.all([
         apiRequest<{ items: User[]; total: number; nextCursor: string | null }>(`/api/admin/users${selectedCursor ? `?cursor=${encodeURIComponent(selectedCursor)}` : ""}`, { signal: controller.signal }),
         selectedCursor ? Promise.resolve(null) : apiRequest<{ items: Audit[]; nextCursor: string | null }>("/api/admin/audit", { signal: controller.signal }),
       ]);
       if (generation !== loadGeneration.current) return;
-      if (!session.user) { router.replace("/login"); return; }
-      if (!session.user.isAdmin) { router.replace("/"); return; }
       setSelf(session.user.id);
       setUsers(userPage.items);
       setTotal(userPage.total);
@@ -73,6 +76,16 @@ export default function AdminPage() {
   useEffect(() => { const timer = window.setTimeout(() => void load(), 0); return () => window.clearTimeout(timer); }, [load]);
   useEffect(() => () => loadController.current?.abort(), []);
   useEffect(() => {
+    if (!self) return;
+    const refresh = () => {
+      if (document.visibilityState !== "visible" || !navigator.onLine) return;
+      void apiRequest<{ total: number }>("/api/admin/password-reset-requests").then((page) => setPendingRequests(page.total)).catch(() => {});
+    };
+    const initial = window.setTimeout(refresh, 0);
+    const interval = window.setInterval(refresh, 30_000);
+    return () => { window.clearTimeout(initial); window.clearInterval(interval); };
+  }, [self]);
+  useEffect(() => {
     const dialog = actionDialog.current;
     if (pending && dialog && !dialog.open) dialog.showModal();
     if (!pending && dialog?.open) dialog.close();
@@ -81,7 +94,7 @@ export default function AdminPage() {
 
   function openAction(user: User, action: Action, opener: HTMLElement) {
     actionOpener.current = opener;
-    setError(""); setReason(""); setPassword("");
+    setError(""); setReason(action === "reset_default_password" ? "管理员批准密码重置申请" : ""); setPassword("");
     setPending({ user, action });
   }
 
@@ -94,7 +107,7 @@ export default function AdminPage() {
     if (user.status === "deleted") items.push("restore");
     if (user.role === "user" && user.status === "active") items.push("promote_admin");
     if (user.role === "admin" && user.status === "active") items.push("demote_admin");
-    if (user.id !== self && (user.status === "active" || user.status === "reset_pending")) items.push("reset_password");
+    if (user.id !== self && user.status === "active") items.push("reset_default_password", "reset_password");
     return items;
   }
 
@@ -147,7 +160,7 @@ export default function AdminPage() {
   return <main className="mx-auto max-w-7xl px-3 py-5 sm:px-6 sm:py-8">
     <header className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
       <div><Link href="/" className="text-sm font-medium text-slate-500 hover:text-slate-800">← 返回登记表</Link><h1 className="mt-2 text-2xl font-bold">管理员</h1><p className="mt-1 text-sm text-slate-500">账号状态、角色和操作审计。账号删除为可恢复软删除。</p></div>
-      <div className="flex flex-wrap gap-2"><a href="/admin/marks" className="min-h-11 rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold hover:bg-slate-50">登记管理</a><button type="button" onClick={() => void signOut()} className="min-h-11 rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold">退出</button></div>
+      <div className="flex flex-wrap gap-2"><a href="/admin/marks" className="min-h-11 rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold hover:bg-slate-50">登记管理</a><Link href="/admin/password-reset-requests" className="min-h-11 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-semibold text-amber-900">站内申请{pendingRequests > 0 ? ` · ${pendingRequests}` : ""}</Link><button type="button" onClick={() => void signOut()} className="min-h-11 rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold">退出</button></div>
     </header>
 
     {error && <p role="alert" className="mb-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{error}</p>}
@@ -175,7 +188,7 @@ export default function AdminPage() {
         <div className="flex items-start justify-between gap-4"><div><h2 id="action-title" className="text-xl font-bold">确认{ACTION_LABEL[pending.action]}</h2><p className="mt-1 text-slate-600">目标账号：<strong>{pending.user.username}</strong></p></div><button type="button" autoFocus disabled={busy} aria-label="关闭确认框" onClick={closeAction} className="min-h-11 min-w-11 rounded-lg border border-slate-300 text-xl">×</button></div>
         <p className="mt-4 rounded-lg bg-amber-50 p-3 text-sm leading-6 text-amber-950">
           {pending.action === "delete" ? `将软删除账号，并隐藏其 ${pending.user.active_marks} 条未删除登记；可由管理员恢复，既有独立删除的登记不会随账号恢复。` :
-            pending.action === "reset_password" ? "将撤销此账号现有登录状态。若上游结果不确定，账号会保持停用，需运维核验。" :
+            pending.action === "reset_password" || pending.action === "reset_default_password" ? "将撤销此账号现有登录状态。默认重置后，用户必须设置新密码；若结果不确定，需维护者核验。" :
               pending.action === "ban" ? "将封禁账号并撤销现有登录状态。" :
                 pending.action === "restore" ? "将恢复账号访问；曾独立删除的登记仍保持删除。" :
                   pending.action === "demote_admin" ? "将移除此账号的管理员权限，系统会保护最后一位有效管理员。" :

@@ -12,10 +12,28 @@ export type AppSession = {
   id: string;
   username: string;
   isAdmin: boolean;
+  authEmail: string;
+  authEpoch: number;
+  mustChangePassword: boolean;
+  canChangePasswordWithoutCurrent: boolean;
+  displayName: string;
+  avatarVersion: number;
   expiresAt: string;
 };
 
-type SessionRow = { user_id: string; username: string; is_admin: boolean; expires_at: string };
+type SessionRow = {
+  user_id: string; username: string; is_admin: boolean; expires_at: string; auth_email: string; auth_epoch: number;
+  must_change_password: boolean; display_name: string; avatar_version: number; can_change_password_without_current: boolean;
+};
+
+function appSession(row: SessionRow): AppSession {
+  return {
+    id: row.user_id, username: row.username, isAdmin: row.is_admin, authEmail: row.auth_email,
+    authEpoch: row.auth_epoch, mustChangePassword: row.must_change_password,
+    canChangePasswordWithoutCurrent: row.can_change_password_without_current,
+    displayName: row.display_name, avatarVersion: row.avatar_version, expiresAt: row.expires_at,
+  };
+}
 
 function sessionHash(token: string): string {
   return createHmac("sha256", getServerEnv().sessionHashSecret)
@@ -55,22 +73,23 @@ export async function getSessionHash(): Promise<string | null> {
 export async function currentSession(): Promise<AppSession | null> {
   const tokenHash = await getSessionHash();
   if (!tokenHash) return null;
-  const rows = await rpc<SessionRow[]>("app_get_session", { p_token_hash: tokenHash });
+  const rows = await rpc<SessionRow[]>("app_get_session_context", { p_token_hash: tokenHash });
   const row = rows[0];
   if (!row) return null;
-  return { id: row.user_id, username: row.username, isAdmin: row.is_admin, expiresAt: row.expires_at };
+  return appSession(row);
 }
 
-export async function requireSession(): Promise<{ session: AppSession; tokenHash: string }> {
+export async function requireSession(options: { allowPasswordChange?: boolean } = {}): Promise<{ session: AppSession; tokenHash: string }> {
   const tokenHash = await getSessionHash();
   if (!tokenHash) throw new AppError(401, "unauthenticated", "请先登录。");
-  const rows = await rpc<SessionRow[]>("app_get_session", { p_token_hash: tokenHash });
+  const rows = await rpc<SessionRow[]>("app_get_session_context", { p_token_hash: tokenHash });
   const row = rows[0];
   if (!row) throw new AppError(401, "unauthenticated", "登录状态已失效，请重新登录。");
-  return {
-    tokenHash,
-    session: { id: row.user_id, username: row.username, isAdmin: row.is_admin, expiresAt: row.expires_at },
-  };
+  const session = appSession(row);
+  if (session.mustChangePassword && !options.allowPasswordChange) {
+    throw new AppError(403, "password_change_required", "请先修改密码后再使用其他功能。");
+  }
+  return { tokenHash, session };
 }
 
 export async function clearAppSessionCookie(): Promise<void> {

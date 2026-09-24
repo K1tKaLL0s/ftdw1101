@@ -14,6 +14,7 @@ const coreMigrationFiles = [
 ] as const;
 const scheduleMigrationFile = "supabase/migrations/20260924140810_five_daily_slots.sql";
 const migrationFiles = [...coreMigrationFiles, scheduleMigrationFile] as const;
+const accountMigrationFile = "supabase/migrations/20260924155601_account_center_password_recovery.sql";
 
 const ids = {
   admin: "00000000-0000-4000-8000-000000000001",
@@ -45,6 +46,8 @@ async function resetDatabase(legacy = false): Promise<PGlite> {
   const target = new PGlite();
   await target.exec(
     "create role anon; create role authenticated; create role service_role; create schema auth;" +
+    "create schema storage; create table storage.buckets(id text primary key,name text not null,public boolean not null default false," +
+    "file_size_limit bigint,allowed_mime_types text[]);" +
     "create table auth.users (id uuid primary key,email text unique,raw_user_meta_data jsonb not null default '{}'::jsonb," +
     "raw_app_meta_data jsonb not null default '{}'::jsonb,created_at timestamptz not null default now());",
   );
@@ -333,6 +336,152 @@ test("five-slot migration guards legacy marks and preserves schedule-version RPC
   } finally {
     await fresh.close();
     await guard.close();
+  }
+});
+
+test("account recovery grants are session-bound and note-bearing marks preserve compatibility", async () => {
+  const fresh = await resetDatabase();
+  try {
+    await applyMigrations(fresh);
+    const memberId = "00000000-0000-4000-8000-000000000301";
+    await addAuthUser(fresh, { id: memberId, username: "accountmember", deviceHash: "1".repeat(64) });
+    await fresh.query(
+      "insert into public.marks(user_id,week_key,day_index,slot_index,nickname,location) values($1,$2,0,0,'old nickname','Old place')",
+      [memberId, currentWeek],
+    );
+    await fresh.exec(await readFile(accountMigrationFile, "utf8"));
+
+    const adminId = "00000000-0000-4000-8000-000000000302";
+    await addAuthUser(fresh, { id: adminId, username: "accountadmin", deviceHash: "2".repeat(64) });
+    await fresh.query("update public.profiles set role='admin' where id=$1", [adminId]);
+    const requestUserId = "00000000-0000-4000-8000-000000000303";
+    await addAuthUser(fresh, { id: requestUserId, username: "requestmember", deviceHash: "3".repeat(64) });
+    const memberSession = "a".repeat(64);
+    const adminSession = "b".repeat(64);
+    const otherAdminSession = "c".repeat(64);
+    await fresh.query("select public.app_register_session($1,$2,$3)", [memberId, memberSession, 0]);
+    await fresh.query("select public.app_register_session($1,$2,$3)", [adminId, adminSession, 0]);
+    await fresh.query("select public.app_register_session($1,$2,$3)", [adminId, otherAdminSession, 0]);
+
+    const priorNote = (await fresh.query<{ note: string }>("select note from public.marks where user_id=$1", [memberId])).rows[0].note;
+    assert.equal(priorNote, "", "pre-migration marks receive an empty note");
+    const item = [{ day_index: 0, slot_index: 0, nickname: "updated", location: "", schedule_version: SCHEDULE_VERSION }];
+    const multilineNote = "需要带桌游\n<script>alert(1)</script>";
+    await fresh.query("select public.app_upsert_marks_with_note($1,$2,$3::jsonb,$4)", [memberSession, currentWeek, JSON.stringify(item), multilineNote]);
+    assert.equal((await fresh.query<{ note: string }>("select note from public.marks where user_id=$1", [memberId])).rows[0].note, multilineNote);
+    await fresh.query("select public.app_upsert_marks_with_note($1,$2,$3::jsonb)", [memberSession, currentWeek, JSON.stringify(item)]);
+    assert.equal((await fresh.query<{ note: string }>("select note from public.marks where user_id=$1", [memberId])).rows[0].note, multilineNote,
+      "omitting p_note preserves existing notes for older BFF callers");
+    const legacyItem = [{ ...item[0], nickname: "legacy update" }];
+    await fresh.query("select public.app_upsert_marks($1,$2,$3::jsonb)", [memberSession, currentWeek, JSON.stringify(legacyItem)]);
+    assert.equal((await fresh.query<{ note: string }>("select note from public.marks where user_id=$1", [memberId])).rows[0].note, multilineNote,
+      "the old RPC remains available and does not erase the new note column");
+    await fresh.query("select public.app_upsert_marks_with_note($1,$2,$3::jsonb,$4)", [memberSession, currentWeek, JSON.stringify(legacyItem), ""]);
+    assert.equal((await fresh.query<{ note: string }>("select note from public.marks where user_id=$1", [memberId])).rows[0].note, "",
+      "an explicit empty note clears it");
+    await fresh.query("select public.app_upsert_marks_with_note($1,$2,$3::jsonb,$4)", [memberSession, currentWeek, JSON.stringify(legacyItem), "x".repeat(200)]);
+    await assert.rejects(
+      fresh.query("select public.app_upsert_marks_with_note($1,$2,$3::jsonb,$4)", [memberSession, currentWeek, JSON.stringify(legacyItem), "x".repeat(201)]),
+      /note too long/,
+    );
+    const detail = (await fresh.query<{ app_list_cell: { items: Array<{ note: string; avatar_version: number }> } }>(
+      "select public.app_list_cell($1,$2,0,0,null,null,30)", [memberSession, currentWeek],
+    )).rows[0].app_list_cell;
+    assert.equal(detail.items[0].note.length, 200);
+    assert.equal(detail.items[0].avatar_version, 0);
+    const userWeek = (await fresh.query<{ app_user_week: Record<string, unknown> }>(
+      "select public.app_user_week($1,$2,$3)", [memberSession, memberId, currentWeek],
+    )).rows[0].app_user_week;
+    assert.deepEqual(Object.keys(userWeek.user as object).sort(), ["avatar_version", "display_name", "id"]);
+    assert.equal((userWeek.items as Array<{ note: string }>)[0].note.length, 200);
+    const weekCell = (await fresh.query<{ preview: Array<{ user_id: string; nickname: string; avatar_version: number }> }>(
+      "select preview from public.app_list_week($1,$2) where day_index=0 and slot_index=0", [memberSession, currentWeek],
+    )).rows[0];
+    assert.equal(weekCell.preview.length, 1);
+    assert.equal(weekCell.preview[0].user_id, memberId);
+
+    const grant = (await fresh.query<{ can_change_password_without_current: boolean }>(
+      "select can_change_password_without_current from public.app_get_session_context($1)", [adminSession],
+    )).rows[0];
+    assert.equal(grant.can_change_password_without_current, false);
+    await fresh.query(
+      "insert into public.password_change_grants(user_id,session_hash,expires_at) values($1,$2,now()+interval '1 hour')",
+      [adminId, adminSession],
+    );
+    assert.equal((await fresh.query<{ can_change_password_without_current: boolean }>(
+      "select can_change_password_without_current from public.app_get_session_context($1)", [adminSession],
+    )).rows[0].can_change_password_without_current, true);
+    assert.equal((await fresh.query<{ can_change_password_without_current: boolean }>(
+      "select can_change_password_without_current from public.app_get_session_context($1)", [otherAdminSession],
+    )).rows[0].can_change_password_without_current, false, "the grant cannot authorize another session for the same account");
+    const recoveryAttempt = (await fresh.query<{ app_prepare_recovery_password_change: string }>(
+      "select public.app_prepare_recovery_password_change($1,0)", [adminSession],
+    )).rows[0].app_prepare_recovery_password_change;
+    assert.equal((await fresh.query<{ n: number }>(
+      "select count(*)::int n from public.app_sessions where user_id=$1 and revoked_at is null", [adminId],
+    )).rows[0].n, 0, "claiming the grant revokes every session");
+    await fresh.query("select public.app_finish_self_password_change($1,$2,'changed')", [adminId, recoveryAttempt]);
+    const consumedGrant = (await fresh.query<{ claimed_attempt: string; consumed_at: string }>(
+      "select claimed_attempt,consumed_at from public.password_change_grants where user_id=$1", [adminId],
+    )).rows[0];
+    assert.equal(consumedGrant.claimed_attempt, recoveryAttempt);
+    assert.ok(consumedGrant.consumed_at);
+    const adminProfile = (await fresh.query<{ status: string; auth_epoch: number; must_change_password: boolean }>(
+      "select status,auth_epoch,must_change_password from public.profiles where id=$1", [adminId],
+    )).rows[0];
+    assert.deepEqual(adminProfile, { status: "active", auth_epoch: 2, must_change_password: false });
+    await assert.rejects(
+      fresh.query("select public.app_finish_self_password_change($1,$2,'changed')", [memberId, recoveryAttempt]),
+      /not pending for this attempt/,
+    );
+
+    const adminEpoch = adminProfile.auth_epoch;
+    const freshAdminSession = "d".repeat(64);
+    await fresh.query("select public.app_register_session($1,$2,$3)", [adminId, freshAdminSession, adminEpoch]);
+    const reset = (await fresh.query<{ app_admin_action: { reset_attempt: string } }>(
+      "select public.app_admin_action($1,$2,'prepare_password_reset','approved after identity check')", [freshAdminSession, memberId],
+    )).rows[0].app_admin_action;
+    await assert.rejects(
+      fresh.query("select public.app_finish_self_password_change($1,$2,'changed')", [memberId, reset.reset_attempt]),
+      /not pending for this attempt/,
+      "an administrator reset attempt cannot be reused by the self-service finish RPC",
+    );
+    await assert.rejects(
+      fresh.query("select public.app_finish_self_password_change($1,$2,null)", [memberId, reset.reset_attempt]),
+      /invalid password change outcome/,
+      "NULL outcome is explicitly rejected",
+    );
+    await fresh.query("select public.app_admin_fail_password_reset($1,$2,$3)", [freshAdminSession, memberId, reset.reset_attempt]);
+
+    const bucket = (await fresh.query<{ public: boolean; file_size_limit: number; allowed_mime_types: string[] }>(
+      "select public,file_size_limit,allowed_mime_types from storage.buckets where id='avatars'",
+    )).rows[0];
+    assert.deepEqual(bucket, { public: false, file_size_limit: 262144, allowed_mime_types: ["image/webp"] });
+    const privileges = (await fresh.query<{ anonymous_grant_table: boolean; authenticated_request_table: boolean; anon_recovery_rpc: boolean; service_recovery_rpc: boolean }>(
+      "select has_table_privilege('anon','public.password_change_grants','select') anonymous_grant_table," +
+      "has_table_privilege('authenticated','public.password_reset_requests','select') authenticated_request_table," +
+      "has_function_privilege('anon','public.app_prepare_recovery_password_change(text,bigint)','execute') anon_recovery_rpc," +
+      "has_function_privilege('service_role','public.app_prepare_recovery_password_change(text,bigint)','execute') service_recovery_rpc",
+    )).rows[0];
+    assert.deepEqual(privileges, { anonymous_grant_table: false, authenticated_request_table: false, anon_recovery_rpc: false, service_recovery_rpc: true });
+
+    assert.equal((await fresh.query<{ app_request_password_reset: boolean }>(
+      "select public.app_request_password_reset('requestmember')",
+    )).rows[0].app_request_password_reset, true);
+    await fresh.query("update public.profiles set status='reset_pending' where id=$1", [requestUserId]);
+    const requests = (await fresh.query<{ app_admin_list_password_reset_requests: { total: number; items: Array<{ status: string }> } }>(
+      "select public.app_admin_list_password_reset_requests($1,null,null,30)", [freshAdminSession],
+    )).rows[0].app_admin_list_password_reset_requests;
+    assert.equal(requests.total, requests.items.length);
+    assert.equal(requests.items[0].status, "reset_pending", "an unknown request remains visible for diagnosis");
+    await fresh.query("select public.app_admin_dismiss_password_reset_request($1,$2)", [freshAdminSession, (await fresh.query<{ id: string }>("select id from public.password_reset_requests where status='pending'")).rows[0].id]);
+    await fresh.query("update public.profiles set status='active' where id=$1", [requestUserId]);
+    await fresh.query("update public.password_reset_requests set requested_at=now()-interval '2 days',handled_at=now() where user_id=$1", [requestUserId]);
+    assert.equal((await fresh.query<{ app_request_password_reset: boolean }>(
+      "select public.app_request_password_reset('requestmember')",
+    )).rows[0].app_request_password_reset, false, "cooldown is measured from handled_at, even when requested_at is old");
+  } finally {
+    await fresh.close();
   }
 });
 

@@ -48,3 +48,43 @@ test("mark validation requires the current schedule version and accepts exactly 
   assert.equal(staleVersion.success, false);
   if (!staleVersion.success) assert.ok(staleVersion.error.issues.some((issue) => issue.message === "时段已更新，请刷新页面后重试。"));
 });
+
+test("shared mark fields fit the full legal Chinese payload under 16 KiB and normalize legacy input", () => {
+  const coordinates = Array.from({ length: WEEK_CELL_COUNT }, (_, index) => ({
+    day_index: Math.floor(index / SLOT_COUNT),
+    slot_index: index % SLOT_COUNT,
+  }));
+  const shared = {
+    week_key: "2026-09-21",
+    schedule_version: SCHEDULE_VERSION,
+    nickname: "林".repeat(30),
+    location: "场".repeat(100),
+    note: "备".repeat(200),
+    items: coordinates,
+  };
+  const sharedBytes = Buffer.byteLength(JSON.stringify(shared), "utf8");
+  assert.ok(sharedBytes < 16_384, `shared input must fit the existing request limit (${sharedBytes} bytes)`);
+  const parsedShared = marksWriteSchema.safeParse(shared);
+  assert.equal(parsedShared.success, true);
+  if (!parsedShared.success) return;
+  assert.equal(parsedShared.data.items.length, WEEK_CELL_COUNT);
+  assert.equal(parsedShared.data.items[34].nickname, shared.nickname);
+  assert.equal(parsedShared.data.items[34].location, shared.location);
+  assert.equal(parsedShared.data.note, shared.note);
+  assert.equal(parsedShared.data.items.every((item) => item.location === shared.location), true);
+
+  const legacy = {
+    week_key: shared.week_key,
+    schedule_version: SCHEDULE_VERSION,
+    note: shared.note,
+    items: coordinates.map((item) => ({ ...item, nickname: shared.nickname, location: shared.location })),
+  };
+  assert.equal(Buffer.byteLength(JSON.stringify(legacy), "utf8"), 16_396);
+  const parsedLegacy = marksWriteSchema.safeParse(legacy);
+  assert.equal(parsedLegacy.success, true, "the previous per-item shape remains accepted when within HTTP limit");
+  if (parsedLegacy.success) assert.deepEqual(parsedLegacy.data.items[0], { ...coordinates[0], nickname: shared.nickname, location: shared.location });
+
+  assert.equal(marksWriteSchema.safeParse({ ...shared, items: legacy.items }).success, false, "root shared fields cannot mix with per-item nicknames and locations");
+  assert.equal(marksWriteSchema.safeParse({ ...legacy, nickname: shared.nickname, location: shared.location }).success, false, "old clients cannot add shared fields on top of full items");
+  assert.equal(marksWriteSchema.safeParse({ ...shared, location: "" }).success, true, "an empty shared location remains valid and maps to the existing default downstream");
+});

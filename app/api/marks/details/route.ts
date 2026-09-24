@@ -9,7 +9,7 @@ import { SLOT_COUNT } from "@/lib/schedule";
 
 export const dynamic = "force-dynamic";
 
-type Detail = { id: string; user_id: string; nickname: string; location: string; created_at: string };
+type Detail = { id: string; user_id: string; nickname: string; location: string; note: string; avatar_version: number; created_at: string };
 type DetailPage = { items: Detail[]; total: number; hasMore: boolean };
 
 export const GET = api(async (request: NextRequest) => {
