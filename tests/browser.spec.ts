@@ -136,7 +136,7 @@ test("mark notes stay plain text and the registration controls align without res
       await expect(cards.filter({ hasText: "17:00–20:00" }).getByText("当前时段", { exact: true })).toBeVisible();
       const cardGeometry = await cards.evaluateAll((elements) => elements.map((element) => {
         const rect = element.getBoundingClientRect();
-        const buttons = [...element.querySelectorAll("button")].map((button) => button.getBoundingClientRect());
+        const buttons = [...element.querySelectorAll(":scope > div:last-child > button")].map((button) => button.getBoundingClientRect());
         return { height: rect.height, buttonHeight: buttons.map((button) => button.height), buttonBottom: buttons.map((button) => button.bottom) };
       }));
       expect(Math.max(...cardGeometry.map((rect) => rect.height)) - Math.min(...cardGeometry.map((rect) => rect.height))).toBeLessThanOrEqual(1);
@@ -358,6 +358,171 @@ test("admin reset dialog displays backend errors, clears secrets on cancel, and 
   await expect(resetButton).toBeFocused();
   await resetButton.click();
   await expect(page.getByLabel("新密码", { exact: true })).toHaveValue("");
+});
+
+test("own reservation management is owner-only, cancelable, retryable, and refreshes the schedule", async ({ page }) => {
+  await page.clock.install({ time: new Date("2026-09-25T10:00:00.000Z") });
+  await page.route("**/api/auth/session", (route) => route.fulfill(ok({ user, serverTime: "2026-09-25T10:00:00.000Z" })));
+  const ownMark = { id: "33333333-3333-4333-8333-333333333333", user_id: user.id, nickname: "我的预约", location: "场地甲", note: "备注", avatar_version: 0, created_at: "2026-09-24T00:00:00Z" };
+  const otherMark = { ...ownMark, id: "44444444-4444-4444-8444-444444444444", user_id: "55555555-5555-4555-8555-555555555555", nickname: "另一位牌友" };
+  let ownExists = true;
+  let deleteRequests = 0;
+  let releaseDelete = deferred();
+  await page.route("**/api/marks?*", (route) => {
+    const slots = emptySlots().map((slot) => ({ ...slot, preview: [] as Array<{ user_id: string; nickname: string; avatar_version: number }> }));
+    slots[0] = { ...slots[0], count: ownExists ? 1 : 0, mine: ownExists, preview: ownExists ? [{ user_id: user.id, nickname: "我的预约", avatar_version: 0 }] : [] };
+    slots[1] = { ...slots[1], count: 1, mine: false, preview: [{ user_id: otherMark.user_id, nickname: otherMark.nickname, avatar_version: 0 }] };
+    return route.fulfill(ok({ slots, serverTime: "2026-09-25T10:00:00.000Z" }));
+  });
+  await page.route("**/api/marks/details?*", (route) => {
+    const slot = Number(new URL(route.request().url()).searchParams.get("slot"));
+    const items = slot === 0 ? (ownExists ? [ownMark] : []) : [otherMark];
+    return route.fulfill(ok({ items, total: items.length, nextCursor: null }));
+  });
+  await page.route(`**/api/marks/${ownMark.id}`, async (route) => {
+    deleteRequests += 1;
+    if (deleteRequests === 1) return route.fulfill(ok({ error: { message: "模拟删除失败" } }, 503));
+    await releaseDelete.promise;
+    ownExists = false;
+    return route.fulfill(ok({ changed: 1 }));
+  });
+
+  for (const width of [1280, 390]) {
+    ownExists = true;
+    deleteRequests = 0;
+    releaseDelete = deferred();
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/schedule");
+    if (width < 768) await page.getByRole("button", { name: /周一/ }).first().click();
+    const cell = width >= 768
+      ? page.getByRole("table", { name: "本周七天五个时段登记表" }).locator("tbody tr").nth(0).locator("td").nth(0)
+      : page.locator('section[aria-label="每周可预约时间"] article').filter({ hasText: "08:00–11:00" });
+    await expect(cell).toHaveClass(/bg-emerald-50/);
+    const manage = page.getByRole("button", { name: "你已登记 · 管理" });
+    await expect(manage).toBeVisible();
+    await manage.click();
+    let dialog = page.getByRole("dialog");
+    let ownRow = dialog.locator("article").filter({ hasText: "我的预约" });
+    await expect(ownRow.getByRole("button", { name: "删除我的预约" })).toBeVisible();
+    await page.once("dialog", (browserDialog) => browserDialog.dismiss());
+    await ownRow.getByRole("button", { name: "删除我的预约" }).click();
+    expect(deleteRequests).toBe(0);
+    await expect(ownRow).toBeVisible();
+
+    await dialog.getByRole("button", { name: "关闭详情" }).click();
+    if (width >= 768) await page.getByRole("button", { name: /周一 11:00–14:00.*查看详情/ }).click();
+    else await page.locator('section[aria-label="每周可预约时间"] article').filter({ hasText: "11:00–14:00" }).getByRole("button", { name: "查看详情" }).click();
+    dialog = page.getByRole("dialog");
+    const otherRow = dialog.locator("article").filter({ hasText: "另一位牌友" });
+    await expect(otherRow.getByRole("button", { name: "删除我的预约" })).toHaveCount(0);
+    await dialog.getByRole("button", { name: "关闭详情" }).click();
+    await page.getByRole("button", { name: "你已登记 · 管理" }).click();
+    dialog = page.getByRole("dialog");
+    ownRow = dialog.locator("article").filter({ hasText: "我的预约" });
+
+    await page.once("dialog", (browserDialog) => browserDialog.accept());
+    await ownRow.getByRole("button", { name: "删除我的预约" }).click();
+    await expect(dialog.getByRole("alert")).toContainText("模拟删除失败");
+    await expect(ownRow).toBeVisible();
+    expect(deleteRequests).toBe(1);
+
+    await page.once("dialog", (browserDialog) => browserDialog.accept());
+    await ownRow.getByRole("button", { name: "删除我的预约" }).click();
+    const pending = ownRow.getByRole("button", { name: "删除中…" });
+    await expect(pending).toBeDisabled();
+    const acceptUnexpectedConfirm = (browserDialog: import("@playwright/test").Dialog) => browserDialog.accept();
+    page.on("dialog", acceptUnexpectedConfirm);
+    await pending.evaluate((button) => { button.removeAttribute("disabled"); (button as HTMLButtonElement).click(); });
+    page.off("dialog", acceptUnexpectedConfirm);
+    expect(deleteRequests).toBe(2);
+    releaseDelete.resolve();
+    await expect(dialog.getByText("暂无登记。", { exact: true })).toBeVisible();
+    await dialog.getByRole("button", { name: "关闭详情" }).click();
+    if (width >= 768) {
+      await expect(cell.getByRole("button", { name: /0 条登记/ })).toBeVisible();
+    } else {
+      await expect(cell.getByText("0 条", { exact: true })).toBeVisible();
+    }
+    await expect(cell).not.toHaveClass(/bg-emerald-50/);
+    await expect(page.getByRole("button", { name: "你已登记 · 管理" })).toHaveCount(0);
+  }
+});
+
+test("batch reservation keeps per-slot notes and retries only failed groups", async ({ page }, testInfo) => {
+  await page.clock.install({ time: new Date("2026-09-21T04:00:00.000Z") });
+  const bodies: Array<{ note: string; items: Array<{ day_index: number; slot_index: number; nickname?: string; location?: string }> }> = [];
+  await mockHome(page, { serverTime: () => "2026-09-21T04:00:00.000Z", onSave: async (route) => {
+    const body = route.request().postDataJSON() as (typeof bodies)[number];
+    bodies.push(body);
+    if (bodies.length === 2) return route.fulfill(ok({ error: { message: "第二组失败" } }, 503));
+    return route.fulfill(ok({ accepted: body.items.length, changed: body.items.length }));
+  } });
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/schedule");
+  const table = page.getByRole("table", { name: "本周七天五个时段登记表" });
+  for (let index = 0; index < 13; index += 1) {
+    await table.locator("tbody tr").nth(Math.floor(index / 7)).locator("td").nth(index % 7).locator('button[aria-pressed]').click();
+  }
+  await page.getByLabel("登记昵称").fill("统一昵称");
+  await page.getByLabel(/所在场地/).fill("公共场地");
+  await page.getByLabel("备注 （选填，最多 200 字）").fill("统一备注");
+  await page.getByLabel("分别设置各时段").check();
+  const editors = page.locator("fieldset");
+  await expect(editors).toHaveCount(13);
+  await editors.nth(0).getByLabel("昵称").fill("甲昵称");
+  await editors.nth(0).getByLabel("场地").fill("甲场地");
+  await editors.nth(0).getByLabel("备注").fill("单独备注甲");
+  await editors.nth(1).getByLabel("昵称").fill("乙昵称");
+  await editors.nth(1).getByLabel("场地").fill("乙场地");
+  await editors.nth(1).getByLabel("备注").fill("单独备注乙");
+  await page.screenshot({ path: testInfo.outputPath("batch-reservation.png"), fullPage: true });
+  await page.getByRole("button", { name: "保存登记" }).click();
+  await expect(page.locator("main > p[role=alert]")).toContainText("第二组失败");
+  await expect(page.getByText(/已选 12 个时段/)).toBeVisible();
+  await expect(page.locator("fieldset")).toHaveCount(12);
+  await page.getByRole("button", { name: "保存登记" }).click();
+  await expect(page.getByText("已选 0 个时段", { exact: false })).toBeVisible();
+  const byNote = (batchNote: string) => bodies.filter((body) => body.note === batchNote);
+  expect(byNote("单独备注甲")[0].items[0]).toMatchObject({ nickname: "甲昵称", location: "甲场地" });
+  expect(byNote("单独备注乙").length).toBe(2);
+  expect(byNote("单独备注乙")[0].items[0]).toMatchObject({ nickname: "乙昵称", location: "乙场地" });
+  expect(byNote("统一备注").map((body) => body.items.length)).toEqual([10, 1]);
+  expect(bodies.every((body) => body.items.length <= 10)).toBe(true);
+});
+
+test("copy reservation skips target entries and exposes the project link", async ({ page }) => {
+  await page.clock.install({ time: new Date("2026-09-25T10:00:00.000Z") });
+  await page.route("**/api/auth/session", (route) => route.fulfill(ok({ user, serverTime: "2026-09-25T10:00:00.000Z" })));
+  const copySource = [
+    { id: "66666666-6666-4666-8666-666666666666", day_index: 0, slot_index: 0, nickname: "本人周一", location: "甲场地", note: "甲备注", created_at: "2026-09-24T00:00:00Z" },
+    { id: "77777777-7777-4777-8777-777777777777", day_index: 0, slot_index: 1, nickname: "本人周一", location: "乙场地", note: "乙备注", created_at: "2026-09-24T00:00:00Z" },
+  ];
+  let targetReads = 0;
+  const bodies: Array<{ week_key: string; note: string; items: Array<{ day_index: number; slot_index: number; nickname: string; location: string }> }> = [];
+  await page.route(`**/api/users/${user.id}?*`, (route) => route.fulfill(ok({ user: { id: user.id, display_name: "牌友", avatar_version: 0 }, week_key: "2026-09-21", items: copySource })));
+  await page.route("**/api/marks?*", (route) => {
+    const slots = emptySlots();
+    if (new URL(route.request().url()).searchParams.get("week") === "2026-09-28") { targetReads += 1; slots[1] = { ...slots[1], count: 1, mine: true }; }
+    return route.fulfill(ok({ slots, serverTime: "2026-09-25T10:00:00.000Z" }));
+  });
+  await page.route("**/api/marks", async (route) => {
+    bodies.push(route.request().postDataJSON() as (typeof bodies)[number]);
+    return route.fulfill(ok({ accepted: 1, changed: 1 }));
+  });
+  await page.goto("/schedule");
+  await expect(page.getByRole("link", { name: "查看项目" })).toHaveAttribute("href", "https://github.com/K1tKaLL0s/ftdw1101");
+  await expect(page.getByRole("link", { name: "查看项目" })).toHaveAttribute("target", "_blank");
+  await page.once("dialog", async (browserDialog) => {
+    expect(browserDialog.message()).toContain("9/28");
+    expect(browserDialog.message()).toContain("1 条本人预约");
+    await browserDialog.accept();
+  });
+  await page.getByRole("button", { name: "沿用本周到下一周" }).click();
+  await expect(page.getByText(/已沿用 1 条本人预约到下一周/)).toBeVisible();
+  expect(targetReads).toBe(2);
+  expect(bodies).toHaveLength(1);
+  expect(bodies[0]).toMatchObject({ week_key: "2026-09-28", note: "甲备注", items: [{ day_index: 0, slot_index: 0, nickname: "本人周一", location: "甲场地" }] });
+  await expect(page.getByText("2026-09-21 至 2026-09-27")).toBeVisible();
 });
 
 test("admin restores a record on page two after more than 30 deleted records", async ({ page }) => {

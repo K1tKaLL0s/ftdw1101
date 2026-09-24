@@ -17,9 +17,16 @@ type Slot = { dayIndex: number; slotIndex: number; count: number; mine: boolean;
 type Mark = { id: string; user_id: string; nickname: string; location: string; note: string; avatar_version: number; created_at: string };
 type Cell = { dayIndex: number; slotIndex: number };
 type DetailState = { cell: Cell; items: Mark[]; total: number; nextCursor: string | null; loading: boolean };
+type SlotDraft = { nickname: string; location: string; note: string };
 
 function messageOf(error: unknown): string {
   return error instanceof ApiError ? error.message : "服务暂时不可用，请稍后重试。";
+}
+
+function messageWithFields(error: unknown): string {
+  return error instanceof ApiError && error.fields
+    ? `${messageOf(error)} ${Object.values(error.fields).flat().join(" ")}`
+    : messageOf(error);
 }
 
 export default function Home() {
@@ -37,12 +44,17 @@ export default function Home() {
   const [nickname, setNickname] = useState("");
   const [location, setLocation] = useState("");
   const [note, setNote] = useState("");
+  const [perSlot, setPerSlot] = useState(false);
+  const [slotDrafts, setSlotDrafts] = useState<Record<string, SlotDraft>>({});
   const [pendingRequests, setPendingRequests] = useState(0);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [detail, setDetail] = useState<DetailState | null>(null);
+  const [deleteError, setDeleteError] = useState("");
+  const [deletingMarkId, setDeletingMarkId] = useState<string | null>(null);
+  const [busyAction, setBusyAction] = useState<"saving" | "copying" | "deleting" | null>(null);
   const [sessionUnavailable, setSessionUnavailable] = useState(false);
   const [online, setOnline] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
@@ -55,6 +67,7 @@ export default function Home() {
   const slotGeneration = useRef(0);
   const detailController = useRef<AbortController | null>(null);
   const detailGeneration = useRef(0);
+  const busyRef = useRef(false);
   const detailDialog = useRef<HTMLDialogElement>(null);
   const detailOpener = useRef<HTMLElement | null>(null);
   const currentWeekKey = useRef(weekKey);
@@ -70,7 +83,10 @@ export default function Home() {
     setUser(null);
     setSlots(EMPTY_SLOTS);
     setSelected([]);
+    setSlotDrafts({});
+    setPerSlot(false);
     setDetail(null);
+    setDeleteError("");
     setNickname("");
     setLocation("");
     router.replace("/login");
@@ -107,7 +123,7 @@ export default function Home() {
         if (followingCurrentWeek || clampedWeek) {
           slotController.current?.abort(); detailController.current?.abort();
           slotGeneration.current += 1; detailGeneration.current += 1;
-          setSelected([]); setDetail(null); setSlots(EMPTY_SLOTS); setNotice("");
+          setSelected([]); setSlotDrafts({}); setDetail(null); setDeleteError(""); setSlots(EMPTY_SLOTS); setNotice("");
           setWeekKey(followingCurrentWeek ? todayWeek : clampedWeek!);
           if (followingCurrentWeek) setDayIndex(currentCalendarDay);
         }
@@ -208,20 +224,27 @@ export default function Home() {
   function toggleSelected(day: number, slot: number) {
     if (isHistorical || busy) return;
     const key = `${day}-${slot}`;
-    setSelected((old) => old.includes(key) ? old.filter((item) => item !== key) : [...old, key]);
+    if (selectedKeys.has(key)) {
+      setSelected((old) => old.filter((item) => item !== key));
+      setSlotDrafts((old) => { const next = { ...old }; delete next[key]; return next; });
+      return;
+    }
+    setSelected((old) => [...old, key]);
+    if (perSlot) setSlotDrafts((old) => ({ ...old, [key]: old[key] ?? { nickname, location, note } }));
   }
 
   function closeDetails() {
     detailController.current?.abort();
     detailGeneration.current += 1;
     setDetail(null);
+    setDeleteError("");
   }
 
   function changeWeek(next: string) {
     if (busy) return;
     slotController.current?.abort(); detailController.current?.abort();
     slotGeneration.current += 1; detailGeneration.current += 1;
-    setSelected([]); setDetail(null); setSlots(EMPTY_SLOTS); setNotice("");
+    setSelected([]); setSlotDrafts({}); setDetail(null); setDeleteError(""); setSlots(EMPTY_SLOTS); setNotice("");
     setWeekKey(next);
     if (next === todayWeek) setDayIndex(getShanghaiDayIndex(now));
   }
@@ -233,6 +256,7 @@ export default function Home() {
     const generation = ++detailGeneration.current;
     detailOpener.current = opener ?? null;
     const requestWeek = weekKey;
+    setDeleteError("");
     setDetail({ cell, items: [], total: 0, nextCursor: null, loading: true });
     try {
       const params = new URLSearchParams({ week: requestWeek, day: String(cell.dayIndex), slot: String(cell.slotIndex) });
@@ -273,48 +297,188 @@ export default function Home() {
 
   async function submitMarks(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (busyRef.current) return;
     setNotice("");
     setError("");
     if (isHistorical) { setError("历史周只可查看，不能修改登记。"); return; }
     if (selected.length === 0) { setError("请先选择至少一个日期和时段。"); return; }
-    setBusy(true);
     const submittedWeek = weekKey;
+    const submittedKeys = [...selected];
+    if (perSlot && submittedKeys.some((key) => {
+      const draft = slotDrafts[key] ?? { nickname, location, note };
+      return !draft.nickname.trim() || draft.nickname.length > 30 || draft.location.length > 100 || draft.note.length > 200;
+    })) {
+      setError("请检查每个已选时段：昵称必填且不超过 30 字，场地不超过 100 字，备注不超过 200 字。");
+      return;
+    }
+    busyRef.current = true;
+    setBusy(true);
+    setBusyAction("saving");
     try {
-      const items = selected.map((key) => {
+      if (!perSlot) {
+        const items = submittedKeys.map((key) => {
+          const [day, slot] = key.split("-").map(Number);
+          return { day_index: day, slot_index: slot };
+        });
+        const result = await postJson<{ accepted: number; changed: number }>("/api/marks", { week_key: submittedWeek, schedule_version: SCHEDULE_VERSION, nickname, location, note, items });
+        if (submittedWeek !== currentWeekKey.current) return;
+        setNotice(result.changed === 0 ? "这些登记已是最新状态，没有需要更改的内容。" : `已保存 ${result.changed} 条登记。空场地按“皆可”保存。`);
+        setSelected([]); setSlotDrafts({});
+        await loadSlots(true);
+        return;
+      }
+
+      const groups = new Map<string, Array<{ key: string; day_index: number; slot_index: number; nickname: string; location: string }>>();
+      for (const key of submittedKeys) {
         const [day, slot] = key.split("-").map(Number);
-        return { day_index: day, slot_index: slot };
-      });
-      const result = await postJson<{ accepted: number; changed: number }>("/api/marks", { week_key: submittedWeek, schedule_version: SCHEDULE_VERSION, nickname, location, note, items });
+        const draft = slotDrafts[key] ?? { nickname, location, note };
+        const group = groups.get(draft.note) ?? [];
+        group.push({ key, day_index: day, slot_index: slot, nickname: draft.nickname, location: draft.location });
+        groups.set(draft.note, group);
+      }
+      const batches = Array.from(groups, ([groupNote, items]) => ({ note: groupNote, items }))
+        .flatMap(({ note: groupNote, items }) => Array.from({ length: Math.ceil(items.length / 10) }, (_, index) => ({ note: groupNote, items: items.slice(index * 10, index * 10 + 10) })));
+      const savedKeys = new Set<string>();
+      let failure: unknown = null;
+      for (const batch of batches) {
+        try {
+          await postJson("/api/marks", {
+            week_key: submittedWeek,
+            schedule_version: SCHEDULE_VERSION,
+            note: batch.note,
+            items: batch.items.map(({ day_index, slot_index, nickname: itemNickname, location: itemLocation }) => ({ day_index, slot_index, nickname: itemNickname, location: itemLocation })),
+          });
+          for (const item of batch.items) savedKeys.add(item.key);
+        } catch (reason) { failure = reason; break; }
+      }
       if (submittedWeek !== currentWeekKey.current) return;
-      setNotice(result.changed === 0 ? "这些登记已是最新状态，没有需要更改的内容。" : `已保存 ${result.changed} 条登记。空场地按“皆可”保存。`);
-      setSelected([]);
+      if (savedKeys.size > 0) {
+        setSelected((old) => old.filter((key) => !savedKeys.has(key)));
+        setSlotDrafts((old) => Object.fromEntries(Object.entries(old).filter(([key]) => !savedKeys.has(key))));
+      }
+      if (failure) {
+        setNotice(savedKeys.size ? `已保存 ${savedKeys.size} 个时段；未完成的选择和内容已保留，可修正后重试。` : "");
+        setError(messageWithFields(failure));
+      } else {
+        setNotice(`已保存 ${savedKeys.size} 个时段。未提交的选择和内容已保留。`);
+      }
       await loadSlots(true);
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 401) handleUnauthorized();
-      else if (submittedWeek === currentWeekKey.current) setError(reason instanceof ApiError && reason.fields
-        ? messageOf(reason) + " " + Object.values(reason.fields).flat().join(" ")
-        : messageOf(reason));
+      else if (submittedWeek === currentWeekKey.current) setError(messageWithFields(reason));
     } finally {
+      busyRef.current = false;
       setBusy(false);
+      setBusyAction(null);
+    }
+  }
+
+  async function copyReservationsToNextWeek() {
+    if (busyRef.current || !user || !clockReady) return;
+    const sourceWeek = todayWeek;
+    const targetWeek = shiftWeekKey(sourceWeek, 1);
+    busyRef.current = true;
+    setBusy(true);
+    setBusyAction("copying");
+    setError("");
+    setNotice("");
+    let copied = 0;
+    let skipped = 0;
+    try {
+      const source = await apiRequest<{ items: Array<{ day_index: number; slot_index: number; nickname: string; location: string; note: string }> }>(`/api/users/${user.id}?week=${encodeURIComponent(sourceWeek)}`);
+      const sourceItems = source.items.map((item) => ({
+        day_index: item.day_index,
+        slot_index: item.slot_index,
+        nickname: item.nickname,
+        location: item.location ?? "",
+        note: item.note ?? "",
+      }));
+      if (sourceItems.length === 0) {
+        setNotice("本周没有可沿用的本人预约。");
+        return;
+      }
+
+      const readTarget = () => apiRequest<{ slots: Slot[] }>(`/api/marks?week=${encodeURIComponent(targetWeek)}`);
+      const firstTarget = await readTarget();
+      const existingKeys = new Set(firstTarget.slots.filter((slot) => slot.mine).map((slot) => `${slot.dayIndex}-${slot.slotIndex}`));
+      const initiallyNew = sourceItems.filter((item) => !existingKeys.has(`${item.day_index}-${item.slot_index}`));
+      skipped = sourceItems.length - initiallyNew.length;
+      if (initiallyNew.length === 0) {
+        setNotice(`下一周已有对应的 ${skipped} 条本人预约，没有需要新增的内容。`);
+        return;
+      }
+
+      const confirmed = window.confirm(`将本周（${formatWeekDay(sourceWeek, 0)} 至 ${formatWeekDay(sourceWeek, 6)}）的 ${initiallyNew.length} 条本人预约沿用到下一周（${formatWeekDay(targetWeek, 0)} 至 ${formatWeekDay(targetWeek, 6)}）。下一周已有对应预约的 ${skipped} 个时段会跳过。是否继续？`);
+      if (!confirmed) return;
+
+      const latestTarget = await readTarget();
+      const latestKeys = new Set(latestTarget.slots.filter((slot) => slot.mine).map((slot) => `${slot.dayIndex}-${slot.slotIndex}`));
+      const pending = initiallyNew.filter((item) => !latestKeys.has(`${item.day_index}-${item.slot_index}`));
+      skipped += initiallyNew.length - pending.length;
+      if (pending.length === 0) {
+        setNotice(`下一周已有对应的 ${skipped} 条本人预约，没有新增内容。`);
+        return;
+      }
+
+      const groups = new Map<string, typeof pending>();
+      for (const item of pending) groups.set(item.note, [...(groups.get(item.note) ?? []), item]);
+      const batches = Array.from(groups, ([batchNote, items]) => ({ note: batchNote, items }))
+        .flatMap(({ note: batchNote, items }) => Array.from({ length: Math.ceil(items.length / 10) }, (_, index) => ({ note: batchNote, items: items.slice(index * 10, index * 10 + 10) })));
+      let failure: unknown = null;
+      for (const batch of batches) {
+        try {
+          await postJson("/api/marks", {
+            week_key: targetWeek,
+            schedule_version: SCHEDULE_VERSION,
+            note: batch.note,
+            items: batch.items.map(({ day_index, slot_index, nickname: itemNickname, location: itemLocation }) => ({ day_index, slot_index, nickname: itemNickname, location: itemLocation })),
+          });
+          copied += batch.items.length;
+        } catch (reason) { failure = reason; break; }
+      }
+      if (failure) {
+        setNotice(copied ? `已沿用 ${copied} 条到下一周；失败部分可再次操作，已成功的时段会自动跳过。` : "");
+        setError(messageWithFields(failure));
+      } else {
+        setNotice(`已沿用 ${copied} 条本人预约到下一周，跳过 ${skipped} 个已有时段；当前选择和草稿保持不变。`);
+      }
+      if (weekKey === targetWeek) await loadSlots(true);
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 401) handleUnauthorized();
+      else setError(messageWithFields(reason));
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+      setBusyAction(null);
     }
   }
 
   async function deleteMark(mark: Mark) {
-    if (mark.user_id !== user?.id) return;
+    const openedDetail = detail;
+    if (busyRef.current || !user || isHistorical || mark.user_id !== user.id || !openedDetail || openedDetail.loading || !openedDetail.items.some((item) => item.id === mark.id && item.user_id === user.id)) return;
     if (!window.confirm(`删除 ${mark.nickname} 的这条登记？`)) return;
     const deletedWeek = weekKey;
-    const deletedCell = detail?.cell;
+    const deletedCell = openedDetail.cell;
     const detailAtDelete = detailGeneration.current;
-    setError("");
+    busyRef.current = true;
+    setBusy(true);
+    setBusyAction("deleting");
+    setDeletingMarkId(mark.id);
+    setDeleteError("");
     try {
       const result = await apiRequest<{ changed: number }>(`/api/marks/${mark.id}`, { method: "DELETE" });
       if (deletedWeek !== currentWeekKey.current) return;
       setNotice(result.changed ? "已删除这条登记。" : "这条登记已不存在或已被删除。");
       await loadSlots(true);
-      if (deletedCell && detailGeneration.current === detailAtDelete) await openDetails(deletedCell);
+      if (detailGeneration.current === detailAtDelete && deletedWeek === currentWeekKey.current) await openDetails(deletedCell);
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 401) handleUnauthorized();
-      else if (deletedWeek === currentWeekKey.current) setError(messageOf(reason));
+      else if (deletedWeek === currentWeekKey.current && detailGeneration.current === detailAtDelete) setDeleteError(messageOf(reason));
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+      setBusyAction(null);
+      setDeletingMarkId(null);
     }
   }
 
@@ -346,7 +510,12 @@ export default function Home() {
             className={`min-h-11 rounded-md border px-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${isSelected ? "border-blue-700 bg-blue-700 text-white" : "border-blue-200 bg-white text-blue-800 hover:bg-blue-50"}`}>
             {isHistorical ? "历史只读" : isSelected ? "已选择" : "选择时段"}
           </button>
-          <span className="min-h-4 text-center text-xs text-emerald-700">{data.mine ? "你已登记" : " "}</span>
+          <div className="flex min-h-11 items-center justify-center">
+            {data.mine ? isHistorical
+              ? <span className="text-center text-xs font-medium text-slate-500">你已登记 · 历史只读</span>
+              : <button type="button" disabled={busy} onClick={(event) => void openDetails({ dayIndex: day, slotIndex: slot }, event.currentTarget)} className="min-h-11 w-full rounded-md border border-emerald-200 bg-white/80 px-1 text-xs font-semibold text-emerald-900 hover:bg-emerald-100">你已登记 · 管理</button>
+              : <span aria-hidden="true" className="invisible min-h-11 text-xs">你已登记 · 管理</span>}
+          </div>
         </div>
       </td>
     );
@@ -368,6 +537,7 @@ export default function Home() {
           <Link href="/account" className="mr-1 inline-flex min-h-11 items-center gap-2 rounded-full bg-slate-100 py-1 pl-1 pr-3 text-sm font-medium"><UserAvatar userId={user.id} version={user.avatarVersion ?? 0} name={user.displayName || user.username} size={36} /><span className="max-w-36 truncate">{user.displayName || user.username}{user.isAdmin ? " · 管理员" : ""}</span></Link>
           {user.isAdmin && <Link href="/admin" className="min-h-11 rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold hover:bg-slate-50">管理</Link>}
           {user.isAdmin && <Link href="/admin/password-reset-requests" className="min-h-11 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm font-semibold text-amber-900">站内申请{pendingRequests > 0 ? ` · ${pendingRequests}` : ""}</Link>}
+          <a href="https://github.com/K1tKaLL0s/ftdw1101" target="_blank" rel="noopener noreferrer" className="inline-flex min-h-11 items-center rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold hover:bg-slate-50">查看项目</a>
           <button type="button" disabled={loggingOut} onClick={() => void signOut()} className="min-h-11 rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold hover:bg-slate-50 disabled:opacity-50">{loggingOut ? "正在退出…" : "退出"}</button>
         </nav>
       </header>
@@ -381,6 +551,7 @@ export default function Home() {
           <button type="button" disabled={weekOffset <= -8 || busy} onClick={() => changeWeek(shiftWeekKey(weekKey, -1))} className="min-h-11 rounded-lg border border-slate-300 px-4 font-medium disabled:opacity-40">上一周</button>
           <button type="button" disabled={weekOffset >= 4 || busy} onClick={() => changeWeek(shiftWeekKey(weekKey, 1))} className="min-h-11 rounded-lg border border-slate-300 px-4 font-medium disabled:opacity-40">下一周</button>
           {weekOffset !== 0 && <button type="button" disabled={busy} onClick={() => changeWeek(todayWeek)} className="min-h-11 rounded-lg bg-blue-50 px-4 font-medium text-blue-800">回到本周</button>}
+          <button type="button" disabled={busy || !clockReady} onClick={() => void copyReservationsToNextWeek()} className="min-h-11 rounded-lg border border-emerald-300 bg-emerald-50 px-3 text-sm font-semibold text-emerald-900 disabled:opacity-50">{busyAction === "copying" ? "正在沿用…" : "沿用本周到下一周"}</button>
         </div>
       </section>
 
@@ -412,7 +583,10 @@ export default function Home() {
                 const isCurrent = weekKey === todayWeek && dayIndex === todayDayIndex && slotIndex === currentSlotIndex;
                 return <article key={slot.label} className={`grid min-w-0 grid-rows-[auto_auto_auto_auto] gap-2 rounded-lg border p-3 ${isCurrent ? "border-blue-500" : isSelected ? "border-blue-400" : "border-slate-200"} ${data.count > 0 ? "bg-emerald-50" : isCurrent ? "bg-amber-50" : isSelected ? "bg-blue-50" : "bg-white"}`}>
                   <div className="flex min-h-8 items-start justify-between gap-3"><h3 className="min-w-0 break-words font-semibold">{slot.label}</h3><span className={`shrink-0 rounded px-2 py-1 text-xs ${isCurrent ? "bg-amber-200 text-amber-950" : "invisible"}`}>当前时段</span></div>
-                  <div className="flex min-h-6 items-center justify-between gap-2"><span className="whitespace-nowrap text-sm text-slate-500">{data.count} 条</span><span className="min-h-4 text-xs text-emerald-700">{data.mine ? "你已登记" : " "}</span></div>
+                  <div className="flex min-h-11 items-center justify-between gap-2"><span className="whitespace-nowrap text-sm text-slate-500">{data.count} 条</span>{data.mine ? isHistorical
+                    ? <span className="text-right text-xs font-medium text-slate-500">你已登记 · 历史只读</span>
+                    : <button type="button" disabled={busy} onClick={(event) => void openDetails({ dayIndex, slotIndex }, event.currentTarget)} className="min-h-11 rounded-md border border-emerald-200 bg-white/80 px-2 text-xs font-semibold text-emerald-900 hover:bg-emerald-100">你已登记 · 管理</button>
+                    : <span aria-hidden="true" className="invisible min-h-11 text-xs">你已登记 · 管理</span>}</div>
                   <div className="flex min-h-8 min-w-0 items-center gap-1 overflow-hidden">{data.preview.slice(0, 3).map((member) => <Link key={member.user_id} href={`/users/${member.user_id}?week=${encodeURIComponent(weekKey)}`} title={member.nickname} className="inline-flex min-w-0 items-center gap-1 rounded-full bg-slate-50 pr-2 text-xs"><UserAvatar userId={member.user_id} version={member.avatar_version} name={member.nickname} size={24} /><span className="max-w-20 truncate">{member.nickname}</span></Link>)}{data.preview.length === 0 && <span className="invisible text-xs">预约者预览</span>}</div>
                   <div className="grid grid-cols-2 gap-2">
                     <button type="button" disabled={data.count === 0} onClick={(event) => void openDetails({ dayIndex, slotIndex }, event.currentTarget)} className="min-h-11 rounded-md bg-slate-100 px-3 text-sm font-medium disabled:opacity-50">查看详情</button>
@@ -427,19 +601,43 @@ export default function Home() {
 
       <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
         <div className="mb-4 flex flex-wrap items-start justify-between gap-2">
-          <div><h2 className="text-lg font-bold">填写登记</h2><p className="mt-1 text-sm text-slate-500">已选 {selected.length} 个时段；一次提交将使用相同昵称和场地。</p>{isHistorical && <p className="mt-1 text-sm font-medium text-amber-800">历史周为只读。</p>}</div>
-          {selected.length > 0 && <button type="button" disabled={busy || isHistorical} onClick={() => setSelected([])} className="min-h-10 px-2 text-sm text-slate-600 underline disabled:opacity-40">清除选择</button>}
+          <div><h2 className="text-lg font-bold">填写登记</h2><p className="mt-1 text-sm text-slate-500">已选 {selected.length} 个时段；{perSlot ? "各时段使用下方分别填写的昵称、场地和备注。" : "一次提交将使用相同昵称和场地。"}</p>{isHistorical && <p className="mt-1 text-sm font-medium text-amber-800">历史周为只读。</p>}</div>
+          {selected.length > 0 && <button type="button" disabled={busy || isHistorical} onClick={() => { setSelected([]); setSlotDrafts({}); }} className="min-h-10 px-2 text-sm text-slate-600 underline disabled:opacity-40">清除选择</button>}
         </div>
         {selected.length > 0 && <div className="mb-4 flex flex-wrap gap-1.5" aria-label="选择摘要">{selected.map((key) => {
           const [day, slot] = key.split("-").map(Number);
           return <span key={key} className="rounded-full bg-blue-50 px-3 py-1 text-xs font-medium text-blue-900">{DAY_LABELS[day]} {formatWeekDay(weekKey, day)} · {SCHEDULE_SLOTS[slot].label}</span>;
         })}</div>}
         <form onSubmit={submitMarks} className="grid gap-x-3 gap-y-1 md:grid-cols-[1fr_1.4fr_auto]">
-          <div className="min-w-0"><label htmlFor="nickname" className="mb-1.5 block min-h-6 text-sm font-semibold">登记昵称</label><input id="nickname" name="nickname" required maxLength={30} disabled={busy || isHistorical} value={nickname} onChange={(event) => setNickname(event.target.value)} placeholder="填写其他人能识别的昵称" className="min-h-12 w-full rounded-lg border border-slate-300 px-3 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100" /></div>
+          <div className="min-w-0"><label htmlFor="nickname" className="mb-1.5 block min-h-6 text-sm font-semibold">登记昵称</label><input id="nickname" name="nickname" required={!perSlot} maxLength={30} disabled={busy || isHistorical} value={nickname} onChange={(event) => setNickname(event.target.value)} placeholder="填写其他人能识别的昵称" className="min-h-12 w-full rounded-lg border border-slate-300 px-3 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100" /></div>
           <div className="min-w-0"><label htmlFor="location" className="mb-1.5 block min-h-6 text-sm font-semibold">所在场地 <span className="font-normal text-slate-500">（选填）</span></label><input id="location" name="location" maxLength={100} disabled={busy || isHistorical} value={location} onChange={(event) => setLocation(event.target.value)} aria-describedby="location-help" placeholder="留空表示场地皆可" className="min-h-12 w-full rounded-lg border border-slate-300 px-3 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100" /></div>
-          <button disabled={busy || isHistorical || selected.length === 0} className="min-h-12 self-end rounded-lg bg-blue-700 px-6 font-semibold text-white hover:bg-blue-800 disabled:opacity-60">{busy ? "正在保存…" : "保存登记"}</button>
+          <button disabled={busy || isHistorical || selected.length === 0} className="min-h-12 self-end rounded-lg bg-blue-700 px-6 font-semibold text-white hover:bg-blue-800 disabled:opacity-60">{busyAction === "saving" ? "正在保存…" : busyAction === "copying" ? "正在沿用…" : busyAction === "deleting" ? "删除中…" : "保存登记"}</button>
           <p className="min-w-0 break-words text-xs text-slate-500">昵称会展示给已登录用户。</p><p id="location-help" className="min-w-0 break-words text-xs text-slate-500">场地可留空表示“皆可”；长名称会换行。</p><span aria-hidden="true" className="hidden md:block" />
           <div className="min-w-0 md:col-span-3"><label htmlFor="mark-note" className="mb-1 block text-sm font-semibold">备注 <span className="font-normal text-slate-500">（选填，最多 200 字）</span></label><textarea id="mark-note" maxLength={200} rows={3} disabled={busy || isHistorical} value={note} onChange={(event) => setNote(event.target.value)} className="w-full resize-y rounded-lg border border-slate-300 p-3 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-100" placeholder="补充时间、位置或其他需要说明的情况" /></div>
+          <div className="md:col-span-3">
+            <label className="inline-flex min-h-11 items-center gap-2 text-sm font-semibold"><input type="checkbox" disabled={busy || isHistorical || selected.length === 0} checked={perSlot} onChange={(event) => {
+              const enabled = event.target.checked;
+              setPerSlot(enabled);
+              if (enabled) setSlotDrafts((old) => {
+                const next = { ...old };
+                for (const key of selected) next[key] ??= { nickname, location, note };
+                return next;
+              });
+            }} />分别设置各时段</label>
+            {perSlot && <div className="mt-2 grid gap-3 md:grid-cols-2">
+              {selected.map((key) => {
+                const [day, slot] = key.split("-").map(Number);
+                const draft = slotDrafts[key] ?? { nickname, location, note };
+                const update = (field: keyof SlotDraft, value: string) => setSlotDrafts((old) => ({ ...old, [key]: { ...draft, [field]: value } }));
+                return <fieldset key={key} className="grid gap-2 rounded-lg border border-slate-200 p-3">
+                  <legend className="px-1 text-sm font-semibold">{DAY_LABELS[day]} {formatWeekDay(weekKey, day)} · {SCHEDULE_SLOTS[slot].label}</legend>
+                  <label className="text-xs font-medium">昵称<input required maxLength={30} disabled={busy} value={draft.nickname} onChange={(event) => update("nickname", event.target.value)} className="mt-1 min-h-11 w-full rounded-lg border border-slate-300 px-3 text-sm" /></label>
+                  <label className="text-xs font-medium">场地<input maxLength={100} disabled={busy} value={draft.location} onChange={(event) => update("location", event.target.value)} className="mt-1 min-h-11 w-full rounded-lg border border-slate-300 px-3 text-sm" /></label>
+                  <label className="text-xs font-medium">备注<textarea maxLength={200} rows={2} disabled={busy} value={draft.note} onChange={(event) => update("note", event.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 p-2 text-sm" /></label>
+                </fieldset>;
+              })}
+            </div>}
+          </div>
         </form>
       </section>
 
@@ -451,11 +649,12 @@ export default function Home() {
           {detail.items.length === 0 && !detail.loading ? <p className="py-8 text-center text-slate-500">暂无登记。</p> : <div className="space-y-2">
             {detail.items.map((mark) => <article key={mark.id} className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
               <div className="flex min-w-0 items-start gap-3"><Link href={`/users/${mark.user_id}?week=${encodeURIComponent(weekKey)}`} aria-label={`查看${mark.nickname}的用户资料`}><UserAvatar userId={mark.user_id} version={mark.avatar_version} name={mark.nickname} size={42} /></Link><div className="min-w-0"><Link href={`/users/${mark.user_id}?week=${encodeURIComponent(weekKey)}`} className="break-words font-semibold text-blue-800 hover:underline">{mark.nickname}</Link><p className="mt-1 break-words text-sm text-slate-600">场地：{mark.location?.trim() || "皆可"}</p>{mark.note && <p className="mt-1 whitespace-pre-wrap break-words text-sm text-slate-700">备注：{mark.note}</p>}</div></div>
-              {mark.user_id === user.id && !isHistorical && <button type="button" onClick={() => void deleteMark(mark)} className="min-h-11 shrink-0 rounded-lg border border-rose-200 px-3 text-sm font-semibold text-rose-800 hover:bg-rose-50">删除</button>}
+              {mark.user_id === user.id && !isHistorical && <button type="button" disabled={busy} onClick={() => void deleteMark(mark)} className="min-h-11 shrink-0 rounded-lg border border-rose-200 px-3 text-sm font-semibold text-rose-800 hover:bg-rose-50 disabled:opacity-50">{deletingMarkId === mark.id ? "删除中…" : "删除我的预约"}</button>}
             </article>)}
           </div>}
+          {deleteError && <p role="alert" className="mb-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{deleteError}</p>}
           {detail.loading && <p className="py-4 text-center text-sm text-slate-500">正在加载…</p>}
-          {detail.nextCursor && !detail.loading && <button type="button" onClick={() => void loadMoreDetails()} className="mt-3 min-h-11 w-full rounded-lg border border-slate-300 font-medium">加载更多</button>}
+          {detail.nextCursor && !detail.loading && <button type="button" disabled={busyAction === "deleting"} onClick={() => void loadMoreDetails()} className="mt-3 min-h-11 w-full rounded-lg border border-slate-300 font-medium disabled:opacity-50">加载更多</button>}
           <p className="mt-4 text-xs text-slate-500">登录用户名、手机号和邮箱不会显示在这里。</p>
       </dialog>}
     </main>
