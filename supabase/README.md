@@ -2,7 +2,22 @@
 
 The app uses Supabase Auth for username/password verification and a same-origin Next.js backend for every browser operation. The browser does not connect to Supabase directly. Do not restore the former anon-key/browser RLS design.
 
-Apply the four migrations in timestamp order. The repository does not include generated Supabase CLI project settings; for first-time CLI use, run `supabase init` and review the created `supabase/config.toml`, then link the intended project with `supabase link --project-ref <project-ref>`. Apply with `supabase migration up --linked`. Alternatively execute the full files in `migrations/` in order in the SQL Editor. Stop if any migration fails. `schema.sql` is only a pointer to those migrations.
+## Production migrations
+
+The production project is deployed from the `K1tKaLL0s/ftdw1101` GitHub repository. Configure the Supabase GitHub integration with working directory `.`, production branch `codex/vercel-deploy`, and Deploy to production enabled. Leave Automatic branching disabled on the Free plan. Database initialization is complete only after the integration logs and remote migration history confirm success.
+
+When enabled, the integration applies new files from `supabase/migrations/` in timestamp order on commits to the configured production branch. Use this integration as the sole production migration runner. Do not also run these same files through the SQL Editor, `supabase db push`, or Supabase MCP; that can apply duplicate DDL or desynchronize migration history. After deployment, inspect the integration's migration logs and read-only migration history, and confirm all four versions are present and successful:
+
+- `202609240001`
+- `202609240002`
+- `202609240003`
+- `202609240004`
+
+If an integration migration fails, stop and inspect its actual log before changing anything. Do not mark it applied manually or reset the production database.
+
+`config.toml` is the repository's local Supabase CLI configuration. Its `project_id = "ftdw1101"` is a local label, not the hosted project's reference ID or a link to production. The file records PostgreSQL 17, enables migrations, and disables seed data. GitHub production deploys apply migration files; they do not synchronize hosted Auth/API settings or seed files. Configure hosted Auth settings separately in the Dashboard before user registration. `schema.sql` is only a pointer to the migrations.
+
+For local CLI development, link only when you have intentionally selected a target project. `supabase link --project-ref <project-ref>` writes local CLI link state; use local test databases for `supabase db reset`. Do not link this repository to production and use `supabase db push` as a second production deploy path.
 
 Create the first password account through the application, then run the one-time operator bootstrap from a trusted machine using the deployment server's service role secret:
 

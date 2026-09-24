@@ -30,14 +30,18 @@
 
 ## 数据库初始化与首个管理员
 
-Supabase 项目创建后，按文件名顺序应用 `supabase/migrations/` 下四个迁移：
+生产数据库只通过 Supabase GitHub 集成初始化：仓库选 `K1tKaLL0s/ftdw1101`，Working directory 设为 `.`，Production branch 设为 `codex/vercel-deploy`，并启用 Deploy to production；Free 方案保持 Automatic branching 关闭。只有集成日志和远端迁移历史均成功，才算完成数据库初始化。
+
+集成启用后，它会按文件名顺序应用 `supabase/migrations/` 中尚未执行的迁移。四个预期版本为：
 
 1. `202609240001_schema.sql`
 2. `202609240002_auth_and_marks.sql`
 3. `202609240003_admin.sql`
 4. `202609240004_privileges.sql`
 
-部署前检查远端迁移历史与仓库一致，避免同一迁移通过控制台和 GitHub 集成重复执行。启用 Supabase Auth 密码登录，将最小密码长度设为 8，并设置 Auth 端登录/注册限流；不要强制应用不要求的小写字母或数字。应用 BFF 不能代替 Supabase Auth 自身的限流与注册触发器保护。
+将 GitHub 集成作为唯一生产迁移入口；不要再通过 SQL Editor、Supabase CLI `db push` 或 MCP 手动执行相同 SQL。检查集成日志与只读迁移历史，确认四个版本逐一成功。失败时根据真实日志排查，不手工标记迁移已应用、不重置生产数据库。Supabase 官方说明 GitHub 集成从配置的生产分支应用迁移；其他配置（包括 Auth 和 seed）不会随生产部署同步，详见[集成说明](https://supabase.com/docs/guides/deployment/branching/github-integration)。
+
+新增的 `supabase/config.toml` 仅记录本地 CLI 标识 `ftdw1101`、PostgreSQL 17、启用迁移和禁用 seed；它不会链接远程项目，也不是 Auth 配置文件。启用 Supabase Auth 密码登录，将最小密码长度设为 8，并设置 Auth 端登录/注册限流；不要强制应用不要求的小写字母或数字。应用 BFF 不能代替 Supabase Auth 自身的限流与注册触发器保护。
 
 部署完成且健康端点可用后，通过公开注册流程创建首个用户；再在受信任管理员机器上按 [README 的管理员初始化步骤](../README.md#数据库和首位管理员)运行 `scripts/bootstrap-admin.mjs <existing-username>`。初始化一次后数据库会拒绝第二次提升首位管理员。不要将 service role key 粘贴到浏览器、聊天或代码仓库。
 
