@@ -45,28 +45,26 @@ export default function LoginPage() {
       <section className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
         <Link href="/" className="text-sm font-medium text-slate-500 hover:text-slate-800">← 来牌首页</Link>
         <h1 className="mt-6 text-3xl font-bold tracking-tight">来牌</h1>
-        <p className="mt-2 text-slate-600">{mode === "login" ? "使用用户名和密码登录。" : "创建账号，加入共享登记表。"}</p>
+        {mode === "login" && <p className="mt-2 text-slate-600">使用用户名和密码登录。</p>}
 
         <form onSubmit={submit} className="mt-7 space-y-5">
           <div>
             <label htmlFor="username" className="mb-1.5 block text-sm font-semibold">用户名</label>
             <input id="username" name="username" autoComplete="username" required minLength={3} maxLength={24}
-              pattern="[A-Za-z0-9_]{3,24}" aria-invalid={Boolean(fieldErrors.username)} aria-describedby="username-help username-error" value={username} onChange={(event) => { setUsername(event.target.value); setFieldErrors((old) => ({ ...old, username: [] })); }}
-              className="min-h-12 w-full rounded-lg border border-slate-300 px-3 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-100" placeholder="3–24 位字母、数字或下划线" />
-            <p id="username-help" className="mt-1 text-xs text-slate-500">手机号和邮箱不用于登录，也不会在页面展示。</p>
-            {fieldErrors.username?.map((error, index) => <p id="username-error" key={index} className="mt-1 text-sm text-rose-700">{error}</p>)}
+              pattern="[A-Za-z0-9_]{3,24}" aria-invalid={Boolean(fieldErrors.username)} aria-describedby={fieldErrors.username?.length ? "username-error" : undefined} value={username} onChange={(event) => { setUsername(event.target.value); setFieldErrors((old) => ({ ...old, username: [] })); }}
+              className="min-h-12 w-full rounded-lg border border-slate-300 px-3 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-100" />
+            {fieldErrors.username?.map((error, index) => <p id={index === 0 ? "username-error" : undefined} key={index} className="mt-1 text-sm text-rose-700">{error}</p>)}
           </div>
           <div>
             <label htmlFor="password" className="mb-1.5 block text-sm font-semibold">密码</label>
             <input id="password" name="password" type="password" autoComplete={mode === "login" ? "current-password" : "new-password"}
-              required maxLength={mode === "register" ? 72 : 128} aria-invalid={Boolean(fieldErrors.password)} aria-describedby="password-help password-error"
+              required maxLength={mode === "register" ? 72 : 128} aria-invalid={Boolean(fieldErrors.password)} aria-describedby={[...(mode === "register" ? ["password-help"] : []), ...(fieldErrors.password?.length ? ["password-error"] : [])].join(" ") || undefined}
               value={password} onChange={(event) => { setPassword(event.target.value); setFieldErrors((old) => ({ ...old, password: [] })); }}
               className="min-h-12 w-full rounded-lg border border-slate-300 px-3 outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-100"
-              placeholder={mode === "login" ? "输入密码" : "至少 8 个字符，含大写字母和特殊符号"} />
+              placeholder={mode === "login" ? "输入密码" : undefined} />
             {mode === "register" && <p id="password-help" className="mt-1 text-xs leading-5 text-slate-500">新密码至少 8 个字符，包含一个大写英文字母和一个特殊符号（如 !、@、#），最多 72 个 UTF-8 字节；不要求小写字母或数字。</p>}
-            {fieldErrors.password?.map((error, index) => <p id="password-error" key={index} className="mt-1 text-sm text-rose-700">{error}</p>)}
+            {fieldErrors.password?.map((error, index) => <p id={index === 0 ? "password-error" : undefined} key={index} className="mt-1 text-sm text-rose-700">{error}</p>)}
           </div>
-          {mode === "register" && <p className="rounded-lg bg-blue-50 px-3 py-2.5 text-sm leading-5 text-blue-900">每个浏览器设备最多登记 2 个账号。网站使用浏览器中的随机标记计数，不读取硬件信息；清除浏览器数据或更换浏览器会改变计数。</p>}
           {message && <p role="alert" className="rounded-lg bg-rose-50 px-3 py-2.5 text-sm text-rose-800">{message}</p>}
           <button disabled={busy} className="min-h-12 w-full rounded-lg bg-blue-700 px-4 font-semibold text-white transition hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-300 disabled:cursor-wait disabled:opacity-60">
             {busy ? "处理中…" : mode === "login" ? "登录" : "注册并登录"}

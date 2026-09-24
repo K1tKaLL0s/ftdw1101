@@ -9,6 +9,7 @@ const migrationFiles = [
   "supabase/migrations/202609240002_auth_and_marks.sql",
   "supabase/migrations/202609240003_admin.sql",
   "supabase/migrations/202609240004_privileges.sql",
+  "supabase/migrations/20260924133213_defer_registration_validation.sql",
 ] as const;
 
 const ids = {
@@ -129,6 +130,7 @@ test("migrations preserve legacy identity/roles, normalize empty locations, and 
     { username: "admin", role: "user", status: "active" },
     { username: "member", role: "user", status: "active" },
   ], "rerunning the schema migration must not replay legacy is_admin/is_banned flags");
+  await db.exec(await readFile(migrationFiles[4], "utf8"));
   await db.query("update public.profiles set role='admin' where id=$1", [ids.admin]);
 });
 
@@ -162,6 +164,99 @@ test("Auth trigger rejects direct signup and enforces the two-account device quo
   const secondRate = await query<{ allowed: boolean }>("select allowed from public.app_consume_rate_limit($1,1,300)", ["b".repeat(64)]);
   assert.equal(rates[0].allowed, true);
   assert.equal(secondRate[0].allowed, false);
+});
+
+test("deferred Auth registration validates final app metadata atomically", async () => {
+  const fresh = await resetDatabase();
+  try {
+    await applyMigrations(fresh);
+
+    const rejectedCases = [
+      {
+        id: "00000000-0000-4000-8000-000000000101",
+        username: "missingmeta",
+        userMetadata: {},
+      },
+      {
+        id: "00000000-0000-4000-8000-000000000102",
+        username: "spoofedmeta",
+        userMetadata: { username: "spoofedmeta", device_hash: "b".repeat(64) },
+      },
+    ];
+    for (const input of rejectedCases) {
+      await fresh.exec("begin");
+      await fresh.query(
+        "insert into auth.users(id,email,raw_user_meta_data,raw_app_meta_data) values($1,$2,$3::jsonb,'{}'::jsonb)",
+        [input.id, input.username + "@team-slots.local", JSON.stringify(input.userMetadata)],
+      );
+      await assert.rejects(fresh.exec("commit"), /registration must be created through the application service/);
+      assert.equal((await fresh.query<{ n: number }>("select count(*)::int as n from auth.users where id=$1", [input.id])).rows[0].n, 0);
+      assert.equal((await fresh.query<{ n: number }>("select count(*)::int as n from public.profiles where id=$1", [input.id])).rows[0].n, 0);
+      assert.equal((await fresh.query<{ n: number }>("select count(*)::int as n from public.device_quotas where device_hash=$1", ["b".repeat(64)])).rows[0].n, 0);
+    }
+
+    const userId = "00000000-0000-4000-8000-000000000103";
+    const deviceHash = "c".repeat(64);
+    await fresh.exec("begin");
+    await fresh.query(
+      "insert into auth.users(id,email,raw_user_meta_data,raw_app_meta_data) values($1,$2,$3::jsonb,'{}'::jsonb)",
+      [userId, "deferreduser@team-slots.local", JSON.stringify({ username: "forgedname", device_hash: "d".repeat(64) })],
+    );
+    await fresh.query("update auth.users set raw_app_meta_data=$2::jsonb where id=$1", [
+      userId,
+      JSON.stringify({ username: "deferreduser", device_hash: deviceHash, provider: "email" }),
+    ]);
+    assert.equal((await fresh.query<{ n: number }>("select count(*)::int as n from public.profiles where id=$1", [userId])).rows[0].n, 0,
+      "the constraint trigger remains deferred until transaction commit");
+    await fresh.exec("commit");
+
+    const profile = (await fresh.query<{ username: string; auth_email: string; role: string; status: string }>(
+      "select username,auth_email,role,status from public.profiles where id=$1", [userId],
+    )).rows[0];
+    assert.deepEqual(profile, {
+      username: "deferreduser",
+      auth_email: "deferreduser@team-slots.local",
+      role: "user",
+      status: "active",
+    });
+    assert.equal((await fresh.query<{ registrations: number }>("select registrations from public.device_quotas where device_hash=$1", [deviceHash])).rows[0].registrations, 1);
+
+    const sessionToken = "e".repeat(64);
+    await fresh.query("select public.app_register_session($1,$2,$3)", [userId, sessionToken, 0]);
+    assert.equal((await fresh.query<{ n: number }>("select count(*)::int as n from public.app_get_session($1) where user_id=$2", [sessionToken, userId])).rows[0].n, 1,
+      "a successfully registered Auth user can establish an application session");
+
+    await fresh.query(
+      "update auth.users set raw_app_meta_data=raw_app_meta_data || '{\"provider\":\"email\"}'::jsonb where id=$1", [userId],
+    );
+    assert.equal((await fresh.query<{ registrations: number }>("select registrations from public.device_quotas where device_hash=$1", [deviceHash])).rows[0].registrations, 1,
+      "updating existing Auth metadata does not rerun registration accounting");
+
+    await addAuthUser(fresh, {
+      id: "00000000-0000-4000-8000-000000000104",
+      username: "seconduser",
+      deviceHash,
+    });
+    assert.equal((await fresh.query<{ registrations: number }>("select registrations from public.device_quotas where device_hash=$1", [deviceHash])).rows[0].registrations, 2);
+
+    const thirdId = "00000000-0000-4000-8000-000000000105";
+    await fresh.exec("begin");
+    await fresh.query(
+      "insert into auth.users(id,email,raw_user_meta_data,raw_app_meta_data) values($1,$2,'{}'::jsonb,'{}'::jsonb)",
+      [thirdId, "thirduser@team-slots.local"],
+    );
+    await fresh.query("update auth.users set raw_app_meta_data=$2::jsonb where id=$1", [
+      thirdId,
+      JSON.stringify({ username: "thirduser", device_hash: deviceHash }),
+    ]);
+    await assert.rejects(fresh.exec("commit"), /device account quota reached/);
+    assert.equal((await fresh.query<{ n: number }>("select count(*)::int as n from auth.users where id=$1", [thirdId])).rows[0].n, 0);
+    assert.equal((await fresh.query<{ n: number }>("select count(*)::int as n from public.profiles where id=$1", [thirdId])).rows[0].n, 0);
+    assert.equal((await fresh.query<{ registrations: number }>("select registrations from public.device_quotas where device_hash=$1", [deviceHash])).rows[0].registrations, 2,
+      "a rejected third account rolls back both identity and quota changes");
+  } finally {
+    await fresh.close();
+  }
 });
 
 test("session epochs, mark ownership/window, soft deletion/recovery, and admin audit hold", async () => {
