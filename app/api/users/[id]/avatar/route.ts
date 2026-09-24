@@ -16,8 +16,8 @@ export const GET = api(async (_request: NextRequest, context: { params: Promise<
   }
   const avatarVersion = await rpc<number>("app_active_avatar_version", { p_session_hash: tokenHash, p_user_id: id });
   const headers = { "Cache-Control": "private, no-store, max-age=0", "X-Content-Type-Options": "nosniff" };
-  const fallback = async () => new NextResponse(await readFile(join(process.cwd(), "public", "default-avatar.svg")), {
-    headers: { ...headers, "Content-Type": "image/svg+xml; charset=utf-8" },
+  const fallback = async () => new NextResponse(await readFile(join(process.cwd(), "public", "default-avatar.png")), {
+    headers: { ...headers, "Content-Type": "image/png" },
   });
   if (avatarVersion === 0) return fallback();
   const { data, error } = await getServiceClient().storage.from("avatars").download(`${id}/avatar.webp`);

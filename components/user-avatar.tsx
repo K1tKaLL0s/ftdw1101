@@ -4,7 +4,7 @@ export function UserAvatar(props: { userId: string; version: number; name: strin
   const size = props.size ?? 48;
   const source = props.version > 0
     ? `/api/users/${encodeURIComponent(props.userId)}/avatar?v=${props.version}`
-    : "/default-avatar.svg";
+    : "/default-avatar.png";
   return <Image
     src={source}
     alt={`${props.name}的头像`}
@@ -15,7 +15,7 @@ export function UserAvatar(props: { userId: string; version: number; name: strin
     style={{ width: size, height: size }}
     onError={(event) => {
       event.currentTarget.onerror = null;
-      event.currentTarget.src = "/default-avatar.svg";
+      event.currentTarget.src = "/default-avatar.png";
     }}
   />;
 }

@@ -432,9 +432,10 @@ test("real Next HTTP handlers enforce origin, body size, authentication, cookies
   expect(privateRead.status()).toBe(401);
   const adminRead = await request.get("/api/admin/users");
   expect(adminRead.status()).toBe(401);
-  const defaultAvatar = await request.get("/default-avatar.svg");
+  const defaultAvatar = await request.get("/default-avatar.png");
   expect(defaultAvatar.status()).toBe(200);
-  expect(await defaultAvatar.text()).toContain("来牌");
+  expect(defaultAvatar.headers()["content-type"]).toContain("image/png");
+  expect([...(await defaultAvatar.body()).subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
   const session = await request.get("/api/auth/session");
   expect(session.status()).toBe(200);
   expect(session.headers()["cache-control"]).toContain("no-store");

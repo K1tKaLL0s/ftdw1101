@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="来牌 Logo">
-  <rect width="256" height="256" rx="52" fill="#17356f"/>
-  <rect x="31" y="31" width="194" height="194" rx="28" fill="#fff"/>
-  <path d="M49 53h54v12H88l15 18-9 8-18-21v23H61V70H49z" fill="#d83a4e"/>
-  <circle cx="193" cy="65" r="12" fill="#e2ae43"/>
-  <text x="128" y="156" text-anchor="middle" font-family="sans-serif" font-size="60" font-weight="800" letter-spacing="2" fill="#17356f">来牌</text>
-  <path d="M77 184h102" stroke="#d83a4e" stroke-width="8" stroke-linecap="round"/>
-</svg>
