@@ -42,7 +42,7 @@ export default function LoginPage() {
     try {
       await postJson(mode === "login" ? "/api/auth/login" : "/api/auth/register", { username, password });
       const session = await apiRequest<{ user: { mustChangePassword: boolean } | null }>("/api/auth/session");
-      router.replace(session.user?.mustChangePassword ? "/account?section=security" : "/");
+      router.replace(session.user?.mustChangePassword ? "/account?section=security" : "/schedule");
       router.refresh();
     } catch (error) {
       if (error instanceof ApiError) { setMessage(error.message); setFieldErrors(error.fields ?? {}); }

@@ -104,7 +104,7 @@ test("mark notes stay plain text and the registration controls align without res
     id: "77777777-7777-4777-8777-777777777777", user_id: user.id, nickname: "小林", location: "场地 A", note,
     avatar_version: 0, created_at: "2026-09-24T00:00:00.000000+00:00",
   }], total: 1, nextCursor: null })));
-  await page.goto("/");
+  await page.goto("/schedule");
   await expect(page.getByRole("heading", { name: "填写登记" })).toBeVisible();
   await page.getByRole("button", { name: "选择时段" }).first().click();
   await page.getByLabel("登记昵称").fill("小林");
@@ -225,7 +225,7 @@ test("home retains failed entry values, saves a blank location, and stays signed
     return route.fulfill(ok({ accepted: 1, changed: 1 }));
   } });
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/");
+  await page.goto("/schedule");
   await expect(page.getByRole("heading", { name: "填写登记" })).toBeVisible();
   await page.getByRole("button", { name: "选择时段" }).first().click();
   await page.getByLabel("登记昵称").fill("小林");
@@ -251,7 +251,7 @@ test("Shanghai schedule clock follows midnight, the new week, and the 08:00 slot
   await page.clock.install({ time: serverNow });
   await page.setViewportSize({ width: 390, height: 844 });
   await mockHome(page, { serverTime: () => serverNow.toISOString() });
-  await page.goto("/");
+  await page.goto("/schedule");
   await expect(page.getByRole("heading", { name: "填写登记" })).toBeVisible();
   await expect(page.getByText("北京时间 2026-09-27 23:59:00", { exact: true })).toBeVisible();
   await expect(page.getByText(/2026-09-21 至 2026-09-27/)).toBeVisible();
@@ -318,7 +318,7 @@ test("delayed prior-week and prior-cell responses do not replace current view", 
     } catch { /* An aborted stale request is expected in this test. */ }
   });
   const holdCell = deferred();
-  await page.goto("/");
+  await page.goto("/schedule");
   await expect(page.getByRole("heading", { name: "填写登记" })).toBeVisible();
   const range = await page.getByText(/Asia\/Shanghai 周一开始/).innerText();
   currentWeek = range.slice(0, 10);

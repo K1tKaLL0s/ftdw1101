@@ -34,7 +34,7 @@ export default function PasswordResetRequestsPage() {
       const session = await apiRequest<{ user: { isAdmin: boolean; mustChangePassword: boolean } | null }>("/api/auth/session");
       if (!session.user) { router.replace("/login"); return; }
       if (session.user.mustChangePassword) { router.replace("/account?section=security"); return; }
-      if (!session.user.isAdmin) { router.replace("/"); return; }
+      if (!session.user.isAdmin) { router.replace("/schedule"); return; }
       const result = await apiRequest<Page>(`/api/admin/password-reset-requests${nextCursor ? `?cursor=${encodeURIComponent(nextCursor)}` : ""}`);
       if (current !== generation.current) return;
       setPage(result); setCursor(nextCursor); setError("");

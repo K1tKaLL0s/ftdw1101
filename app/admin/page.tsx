@@ -51,7 +51,7 @@ export default function AdminPage() {
       if (generation !== loadGeneration.current) return;
       if (!session.user) { router.replace("/login"); return; }
       if (session.user.mustChangePassword) { router.replace("/account?section=security"); return; }
-      if (!session.user.isAdmin) { router.replace("/"); return; }
+      if (!session.user.isAdmin) { router.replace("/schedule"); return; }
       const [userPage, auditPage] = await Promise.all([
         apiRequest<{ items: User[]; total: number; nextCursor: string | null }>(`/api/admin/users${selectedCursor ? `?cursor=${encodeURIComponent(selectedCursor)}` : ""}`, { signal: controller.signal }),
         selectedCursor ? Promise.resolve(null) : apiRequest<{ items: Audit[]; nextCursor: string | null }>("/api/admin/audit", { signal: controller.signal }),
@@ -159,7 +159,7 @@ export default function AdminPage() {
 
   return <main className="mx-auto max-w-7xl px-3 py-5 sm:px-6 sm:py-8">
     <header className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
-      <div><Link href="/" className="text-sm font-medium text-slate-500 hover:text-slate-800">← 返回登记表</Link><h1 className="mt-2 text-2xl font-bold">管理员</h1><p className="mt-1 text-sm text-slate-500">账号状态、角色和操作审计。账号删除为可恢复软删除。</p></div>
+      <div><Link href="/schedule" className="text-sm font-medium text-slate-500 hover:text-slate-800">← 返回登记表</Link><h1 className="mt-2 text-2xl font-bold">管理员</h1><p className="mt-1 text-sm text-slate-500">账号状态、角色和操作审计。账号删除为可恢复软删除。</p></div>
       <div className="flex flex-wrap gap-2"><a href="/admin/marks" className="min-h-11 rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold hover:bg-slate-50">登记管理</a><Link href="/admin/password-reset-requests" className="min-h-11 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-semibold text-amber-900">站内申请{pendingRequests > 0 ? ` · ${pendingRequests}` : ""}</Link><button type="button" onClick={() => void signOut()} className="min-h-11 rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold">退出</button></div>
     </header>
 

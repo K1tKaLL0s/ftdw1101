@@ -80,7 +80,7 @@ export default function AdminMarksPage() {
       calibrate(session.serverTime);
       if (!session.user) { router.replace("/login"); return; }
       if (session.user.mustChangePassword) { router.replace("/account?section=security"); return; }
-      if (!session.user.isAdmin) { router.replace("/"); return; }
+      if (!session.user.isAdmin) { router.replace("/schedule"); return; }
       const params = new URLSearchParams({ week: requestWeek, state: requestView });
       if (selectedCursor) params.set("cursor", selectedCursor);
       const result = await apiRequest<WeekData & { serverTime?: string }>(`/api/admin/marks?${params}`, { signal: controller.signal });
