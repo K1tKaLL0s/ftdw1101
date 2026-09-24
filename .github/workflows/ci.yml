@@ -25,6 +25,16 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm audit --audit-level=low
+      - run: npm run build:vercel
+        if: matrix.node-version == '24.5.0'
+        env:
+          APP_ORIGIN: https://slots.example.invalid
+          SUPABASE_URL: https://project-ref.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ci-only-placeholder-service-role
+          SESSION_HASH_SECRET: ci-only-session-hash-secret-0123456789abcdef
+          DEVICE_SIGNING_SECRET: ci-only-device-sign-secret-0123456789abcdef
+          DEVICE_HASH_SECRET: ci-only-device-hash-secret-0123456789abcdef
+          RATE_LIMIT_HMAC_SECRET: ci-only-rate-limit-secret-0123456789abcdef
       - run: npx playwright install --with-deps chromium
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ms-playwright

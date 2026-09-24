@@ -40,7 +40,7 @@ Supabase 托管 Auth 的字符要求选项不支持“只要求大写+标点”�
 
 ## 部署
 
-仓库保留 Docker/Caddy 和 EdgeOne Pages 两种部署路径。EdgeOne Next.js 全栈部署步骤、环境变量和上线前平台检查见 [EdgeOne 部署说明](docs/edgeone.md)；该路径使用独立的 build:edgeone 命令，Docker standalone 输出仍由 npm run build 生成。
+仓库保留 Docker/Caddy、EdgeOne Pages 和 Vercel 三种部署路径。EdgeOne Next.js 全栈部署步骤、环境变量和上线前平台检查见 [EdgeOne 部署说明](docs/edgeone.md)；Vercel 部署步骤见 [Vercel 部署说明](docs/vercel.md)。两种托管路径都使用各自的构建命令，Docker standalone 输出仍由 npm run build 生成。
 
 Docker 部署使用仓库中的 Dockerfile、Compose 与 Caddy 配置。复制 .env.example 为 .env，配置真实 HTTPS 域名和全部服务端密钥，然后运行 docker compose up --build -d。反向代理只发布 80/443，Next.js 容器仅在 Compose 私有网络上监听；部署环境应启用持久备份、监控、补丁更新和托管 Auth 限流。
 
@@ -50,7 +50,7 @@ Docker 部署使用仓库中的 Dockerfile、Compose 与 Caddy 配置。复制 .
 [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
 ```
 
-不要把真实密钥放入 .env.example、日志或工单。本地直连使用 APP_PROXY_MODE=none。Compose 显式使用 APP_PROXY_MODE=caddy，只信任 Caddy 覆盖的 X-Real-IP；旧版部署可在未设置 APP_PROXY_MODE 时用 TRUST_PROXY=true 选择 Caddy 模式。EdgeOne 配置见 [专门的部署说明](docs/edgeone.md)。不要将 Next.js 端口公开到互联网或让不可信服务连接 Caddy 内网。Caddy 配置限制请求体，并设置读取头、读取体、写入和空闲超时。
+不要把真实密钥放入 .env.example、日志或工单。本地直连使用 APP_PROXY_MODE=none。Compose 显式使用 APP_PROXY_MODE=caddy，只信任 Caddy 覆盖的 X-Real-IP；旧版部署可在未设置 APP_PROXY_MODE 时用 TRUST_PROXY=true 选择 Caddy 模式。EdgeOne 与 Vercel 使用各自的专用代理模式，详情见 [EdgeOne 部署说明](docs/edgeone.md)和 [Vercel 部署说明](docs/vercel.md)。不要将 Next.js 端口公开到互联网或让不可信服务连接 Caddy 内网。Caddy 配置限制请求体，并设置读取头、读取体、写入和空闲超时。
 
 ## 管理功能与数据恢复
 

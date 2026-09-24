@@ -6,6 +6,7 @@ test("proxy mode is explicit when configured and preserves the legacy Caddy swit
   assert.equal(parseProxyMode(undefined, false), "none");
   assert.equal(parseProxyMode(undefined, true), "caddy");
   assert.equal(parseProxyMode("edgeone", true), "edgeone");
+  assert.equal(parseProxyMode("vercel", true), "vercel");
   assert.equal(parseProxyMode(" none ", true), "none");
   assert.throws(() => parseProxyMode("forwarded", false), /APP_PROXY_MODE/);
 });
@@ -15,6 +16,7 @@ test("none mode ignores every forwarded address", () => {
     "eo-connecting-ip": "198.51.100.21",
     "x-real-ip": "203.0.113.22",
     "x-forwarded-for": "192.0.2.23",
+    "x-vercel-forwarded-for": "203.0.113.24",
   });
   assert.equal(trustedClientIp(headers, "none"), "shared");
 });
@@ -35,4 +37,20 @@ test("EdgeOne mode fails closed to the shared bucket for missing, invalid, or li
   assert.equal(trustedClientIp(new Headers(), "edgeone"), "shared");
   assert.equal(trustedClientIp(new Headers({ "eo-connecting-ip": "not-an-ip" }), "edgeone"), "shared");
   assert.equal(trustedClientIp(new Headers({ "eo-connecting-ip": "203.0.113.1, 198.51.100.2" }), "edgeone"), "shared");
+});
+
+test("Vercel mode accepts one valid IPv4 or IPv6 address from its platform header", () => {
+  assert.equal(trustedClientIp(new Headers({ "x-vercel-forwarded-for": "203.0.113.19" }), "vercel"), "203.0.113.19");
+  assert.equal(trustedClientIp(new Headers({ "x-vercel-forwarded-for": "2001:db8::19" }), "vercel"), "2001:db8::19");
+});
+
+test("Vercel mode fails closed for missing, invalid, or list-valued addresses and ignores other headers", () => {
+  assert.equal(trustedClientIp(new Headers(), "vercel"), "shared");
+  assert.equal(trustedClientIp(new Headers({ "x-vercel-forwarded-for": "not-an-ip" }), "vercel"), "shared");
+  assert.equal(trustedClientIp(new Headers({ "x-vercel-forwarded-for": "203.0.113.1, 198.51.100.2" }), "vercel"), "shared");
+  assert.equal(trustedClientIp(new Headers({
+    "x-forwarded-for": "203.0.113.2",
+    "x-real-ip": "203.0.113.3",
+    "eo-connecting-ip": "203.0.113.4",
+  }), "vercel"), "shared");
 });
