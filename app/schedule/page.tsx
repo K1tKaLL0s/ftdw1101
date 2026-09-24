@@ -331,7 +331,7 @@ export default function Home() {
     const isSelected = selectedKeys.has(key);
     const isCurrent = weekKey === todayWeek && day === todayDayIndex && slot === currentSlotIndex;
     return (
-      <td key={key} className={`border p-2 align-top ${isCurrent ? "border-blue-500 bg-amber-50" : isSelected ? "border-slate-200 bg-blue-50" : "border-slate-200 bg-white"}`}>
+      <td key={key} className={`border p-2 align-top ${isCurrent ? "border-blue-500" : "border-slate-200"} ${data.count > 0 ? "bg-emerald-50" : isCurrent ? "bg-amber-50" : isSelected ? "bg-blue-50" : "bg-white"}`}>
         <div className="flex min-h-24 flex-col items-stretch gap-2">
           <button type="button" disabled={data.count === 0} onClick={(event) => void openDetails({ dayIndex: day, slotIndex: slot }, event.currentTarget)}
             aria-label={`${DAY_LABELS[day]} ${SCHEDULE_SLOTS[slot].label}，${data.count} 条登记，查看详情`}
@@ -410,7 +410,7 @@ export default function Home() {
                 const key = `${dayIndex}-${slotIndex}`;
                 const isSelected = selectedKeys.has(key);
                 const isCurrent = weekKey === todayWeek && dayIndex === todayDayIndex && slotIndex === currentSlotIndex;
-                return <article key={slot.label} className={`grid min-w-0 grid-rows-[auto_auto_auto_auto] gap-2 rounded-lg border p-3 ${isCurrent ? "border-blue-500 bg-amber-50" : isSelected ? "border-blue-400 bg-blue-50" : "border-slate-200 bg-white"}`}>
+                return <article key={slot.label} className={`grid min-w-0 grid-rows-[auto_auto_auto_auto] gap-2 rounded-lg border p-3 ${isCurrent ? "border-blue-500" : isSelected ? "border-blue-400" : "border-slate-200"} ${data.count > 0 ? "bg-emerald-50" : isCurrent ? "bg-amber-50" : isSelected ? "bg-blue-50" : "bg-white"}`}>
                   <div className="flex min-h-8 items-start justify-between gap-3"><h3 className="min-w-0 break-words font-semibold">{slot.label}</h3><span className={`shrink-0 rounded px-2 py-1 text-xs ${isCurrent ? "bg-amber-200 text-amber-950" : "invisible"}`}>当前时段</span></div>
                   <div className="flex min-h-6 items-center justify-between gap-2"><span className="whitespace-nowrap text-sm text-slate-500">{data.count} 条</span><span className="min-h-4 text-xs text-emerald-700">{data.mine ? "你已登记" : " "}</span></div>
                   <div className="flex min-h-8 min-w-0 items-center gap-1 overflow-hidden">{data.preview.slice(0, 3).map((member) => <Link key={member.user_id} href={`/users/${member.user_id}?week=${encodeURIComponent(weekKey)}`} title={member.nickname} className="inline-flex min-w-0 items-center gap-1 rounded-full bg-slate-50 pr-2 text-xs"><UserAvatar userId={member.user_id} version={member.avatar_version} name={member.nickname} size={24} /><span className="max-w-20 truncate">{member.nickname}</span></Link>)}{data.preview.length === 0 && <span className="invisible text-xs">预约者预览</span>}</div>
