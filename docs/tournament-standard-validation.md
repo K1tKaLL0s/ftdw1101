@@ -22,7 +22,7 @@
 - `npm run typecheck`、`npm run lint`：通过。
 - `npm run build:vercel`、`npm run build:edgeone`、`npm run build`：全部通过，保留各平台现有构建入口。
 - `npm run test:e2e`：27/27，通过生产与赛事组合浏览器验收，包含五时段/时段外赛事、个人预约操作、密码恢复与真实 HTTP 强制改密拦截，以及复活/名次交错的 UI 回归。
-- 原完整 `npm audit --audit-level=low` 报告 12 项漏洞；安全补丁和非 force 修复后仍有 9 项构建/开发依赖告警（braces 上游无补丁、PostCSS selector parser），属于现有 CI 的明确阻碍。没有改低扫描门槛或隐藏失败。`npm audit --omit=dev --audit-level=low` 为 0 漏洞，但不将其替代完整 CI 结果。具体公告：https://github.com/advisories/GHSA-vfj7-8cjw-p6xm 与 https://github.com/advisories/GHSA-rj75-hqrm-r3gf 。
+- 原完整审计 12 项，运行依赖补丁后剩 9 项；本轮修复 CSS 解析器及其继承告警后剩 7 项，全部来自同一个尚无上游补丁的 braces 公告。运行依赖审计为 0，完整 CI 仍不通过；没有降低门槛或豁免。依赖路径、兼容验证、实际风险及处置选项见 `docs/dependency-audit.md`。
 - 浏览器用本地产物及测试 API fixture；真实 HTTP 测认证、同源、body、cookie、CSP，PGlite 执行完整九次迁移。尚不能据此声称真实线上 Auth、邮件或数据库并发验收完成。
 
 日志位于 `E:/CodexData/2026-10-21/task-4/verification-production/`；浏览器报告与截图使用本任务 E 盘独立 production 输出目录。所有安装、缓存、构建、临时文件保存在 E 盘；未关闭 TLS 证书验证。Git HTTPS 握手失败后复用了本机已有生产 Git 对象。
@@ -58,7 +58,7 @@
 只读线上核对确认项目 Healthy、PostgreSQL 17，依赖 `auth.users(id uuid)`、`profiles.role/status`、`app_sessions`、`audit_log`、`app_private.assert_actor(text,boolean)`、`assert_week_window(text,integer,integer)` 均存在兼容，新对象无冲突。完整生产八迁移后再执行唯一增量的 PGlite 回归确认账号/session 数据及现有 session-context/五时段写函数保持不变。
 
 1. 赛事整合分支提交 PR，目标 `codex/vercel-deploy`；检查独立审查、CI、完整生产/赛事测试和构建，只通过 PR 合并，不 force push 生产。
-2. 生产仓库原文档指定 Supabase GitHub 集成为唯一迁移入口。现有 Chrome 访问该项目集成页跳转登录，本轮未重登录/扩权限；MCP 可读迁移历史但未暴露集成开关，因此当前自动迁移机制尚待确认。先核对集成日志/配置：若已自动应用本迁移，不重复手工；未知结果先查表与历史。只允许这一个已审查增量，不重放旧迁移。
+2. 用户完成 Supabase 登录后已只读核实：项目连接 `K1tKaLL0s/ftdw1101`，工作目录 `.`，生产分支 `codex/vercel-deploy`，Deploy to production 开启，Automatic branching 关闭。生产历史仍为八个旧迁移。唯一新增迁移在合并后由现有 GitHub 集成自动执行，不另行手工重复；合并后检查集成日志、版本和新对象，未知结果先查，不重放旧迁移。没有改变集成设置、创建预览数据库、凭据或权限。
 3. 保留 `APP_ORIGIN=https://project-ch3x2.vercel.app` 规范域名及生产 `APP_PROXY_MODE=vercel` 逻辑；七个现有服务端变量及 APP_PROXY_MODE 的名称已在 Vercel 确认，不展开密钥、不复制生产密钥给 Preview、不新增凭据或收费资源。
 4. 合并会触发 Vercel 生产分支部署。随后检查实际新提交部署、健康端点、首页/账号/五时段/AstrBot，以及真实认证下的发布者/另一用户/管理员和赛事闭环；不能仅凭 PR 或本地 fixture 宣称线上可用。回滚应用时保留数据，不反向执行迁移。
 
