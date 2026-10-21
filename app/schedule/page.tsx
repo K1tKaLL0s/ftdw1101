@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { CalendarTournamentEntries, useCalendarTournaments } from "@/components/tournaments/calendar-events";
 import { ApiError, apiRequest, postJson } from "@/lib/api";
 import { DAY_LABELS, getCurrentSlotIndex, SLOT_COUNT, SCHEDULE_SLOTS, SCHEDULE_VERSION, WEEK_CELL_COUNT } from "@/lib/schedule";
 import { formatShanghaiClock, formatWeekDay, getCurrentWeekKey, getShanghaiDateKey, getShanghaiDayIndex, getWeekOffset, shiftDayKey, shiftWeekKey } from "@/lib/week";
@@ -59,6 +60,8 @@ export default function Home() {
   const [online, setOnline] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [calendarType, setCalendarType] = useState<"all" | "casual" | "tournament">("all");
+  const { tournaments, tournamentError, refreshTournaments } = useCalendarTournaments(weekKey, user?.id ?? null);
   const isHistorical = weekKey < todayWeek;
   const currentSlotIndex = clockReady ? getCurrentSlotIndex(now) : -1;
   const currentCalendarDay = clockReady ? getShanghaiDayIndex(now) : -1;
@@ -497,6 +500,7 @@ export default function Home() {
     return (
       <td key={key} className={`border p-2 align-top ${isCurrent ? "border-blue-500" : "border-slate-200"} ${data.count > 0 ? "bg-emerald-50" : isCurrent ? "bg-amber-50" : isSelected ? "bg-blue-50" : "bg-white"}`}>
         <div className="flex min-h-24 flex-col items-stretch gap-2">
+          {calendarType !== "tournament" && <>
           <button type="button" disabled={data.count === 0} onClick={(event) => void openDetails({ dayIndex: day, slotIndex: slot }, event.currentTarget)}
             aria-label={`${DAY_LABELS[day]} ${SCHEDULE_SLOTS[slot].label}，${data.count} 条登记，查看详情`}
             className="min-h-11 rounded-md bg-slate-100 px-2 text-sm font-medium text-slate-700 hover:bg-slate-200 disabled:cursor-default disabled:opacity-50">
@@ -516,6 +520,8 @@ export default function Home() {
               : <button type="button" disabled={busy} onClick={(event) => void openDetails({ dayIndex: day, slotIndex: slot }, event.currentTarget)} className="min-h-11 w-full rounded-md border border-emerald-200 bg-white/80 px-1 text-xs font-semibold text-emerald-900 hover:bg-emerald-100">你已登记 · 管理</button>
               : <span aria-hidden="true" className="invisible min-h-11 text-xs">你已登记 · 管理</span>}
           </div>
+          </>}
+          {calendarType !== "casual" && <CalendarTournamentEntries items={tournaments} weekKey={weekKey} day={day} slot={slot} />}
         </div>
       </td>
     );
@@ -534,6 +540,8 @@ export default function Home() {
           <p className="mt-1 text-sm text-slate-500">{weekKey} 至 {shiftDayKey(weekKey, 6)} · Asia/Shanghai 周一开始</p>
         </div>
         <nav aria-label="账户导航" className="flex flex-wrap items-center gap-2">
+          <Link href="/tournaments" className="min-h-11 rounded-lg border border-violet-200 bg-violet-50 px-4 py-2.5 text-sm font-semibold text-violet-900">赛事列表</Link>
+          <Link href="/tournaments/new" className="min-h-11 rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white">发布赛事</Link>
           <Link href="/account" className="mr-1 inline-flex min-h-11 items-center gap-2 rounded-full bg-slate-100 py-1 pl-1 pr-3 text-sm font-medium"><UserAvatar userId={user.id} version={user.avatarVersion ?? 0} name={user.displayName || user.username} size={36} /><span className="max-w-36 truncate">{user.displayName || user.username}{user.isAdmin ? " · 管理员" : ""}</span></Link>
           {user.isAdmin && <Link href="/admin" className="min-h-11 rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold hover:bg-slate-50">管理</Link>}
           {user.isAdmin && <Link href="/admin/password-reset-requests" className="min-h-11 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm font-semibold text-amber-900">站内申请{pendingRequests > 0 ? ` · ${pendingRequests}` : ""}</Link>}
@@ -561,10 +569,12 @@ export default function Home() {
       {notice && <p role="status" className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</p>}
 
       <section aria-label="每周可预约时间" className="mb-6 rounded-xl border border-slate-200 bg-white p-3 shadow-sm sm:p-5">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div className="flex flex-wrap gap-2" role="group" aria-label="日历类型筛选">{([["all", "全部"], ["casual", "普通约牌"], ["tournament", "赛事"]] as const).map(([value, label]) => <button key={value} type="button" aria-pressed={calendarType === value} onClick={() => setCalendarType(value)} className={`min-h-11 rounded-lg border px-4 text-sm font-semibold ${calendarType === value ? "border-blue-700 bg-blue-700 text-white" : "border-slate-300 bg-white text-slate-700"}`}>{label}</button>)}</div><span className="text-xs text-slate-500">普通约牌为蓝色操作 · 赛事为紫色条目</span></div>
+        {tournamentError && <aside role="status" className="mb-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-900">赛事暂时无法读取，普通约牌登记可继续使用。<button onClick={refreshTournaments} className="ml-2 min-h-10 underline">重试赛事</button></aside>}
         {loading ? <p className="py-12 text-center text-slate-500">正在加载安排…</p> : <>
           <div className="hidden overflow-x-auto md:block">
             <table className="w-full min-w-[1050px] border-collapse" aria-label="本周七天五个时段登记表">
-              <thead><tr><th className="w-32 border border-slate-200 bg-slate-50 p-3 text-left text-sm">时段</th>{DAY_LABELS.map((day, index) => <th key={day} className={`border border-slate-200 p-3 text-center text-sm ${todayDayIndex === index ? "bg-blue-50 text-blue-900" : "bg-slate-50"}`}>{day}{todayDayIndex === index && <span className="ml-1 text-xs">今天</span>}<span className="mt-1 block font-normal text-slate-500">{formatWeekDay(weekKey, index)}</span></th>)}</tr></thead>
+              <thead><tr><th className="w-32 border border-slate-200 bg-slate-50 p-3 text-left text-sm">时段</th>{DAY_LABELS.map((day, index) => <th key={day} className={`border border-slate-200 p-3 text-center text-sm ${todayDayIndex === index ? "bg-blue-50 text-blue-900" : "bg-slate-50"}`}>{day}{todayDayIndex === index && <span className="ml-1 text-xs">今天</span>}<span className="mt-1 block font-normal text-slate-500">{formatWeekDay(weekKey, index)}</span>{calendarType !== "casual" && <div className="mt-2 space-y-1"><CalendarTournamentEntries items={tournaments} weekKey={weekKey} day={index} slot={-1} /></div>}</th>)}</tr></thead>
               <tbody>{SCHEDULE_SLOTS.map((slot, slotIndex) => <tr key={slot.label}><th scope="row" className={`border border-slate-200 p-3 text-left text-sm font-semibold ${todayDayIndex >= 0 && slotIndex === currentSlotIndex ? "bg-amber-100 text-amber-950" : "bg-slate-50"}`}>{slot.label}{todayDayIndex >= 0 && slotIndex === currentSlotIndex && <span className="mt-1 block text-xs font-medium">当前时段</span>}</th>{DAY_LABELS.map((_, day) => cell(day, slotIndex))}</tr>)}</tbody>
             </table>
           </div>
@@ -575,6 +585,7 @@ export default function Home() {
               </button>)}
             </div>
             <div className="space-y-2">
+              {calendarType !== "casual" && <CalendarTournamentEntries items={tournaments} weekKey={weekKey} day={dayIndex} slot={-1} />}
               {SCHEDULE_SLOTS.map((slot, slotIndex) => {
                 const slotPosition = dayIndex * SLOT_COUNT + slotIndex;
                 const data = slots[slotPosition] ?? EMPTY_SLOTS[slotPosition];
@@ -583,7 +594,7 @@ export default function Home() {
                 const isCurrent = weekKey === todayWeek && dayIndex === todayDayIndex && slotIndex === currentSlotIndex;
                 return <article key={slot.label} className={`grid min-w-0 grid-rows-[auto_auto_auto_auto] gap-2 rounded-lg border p-3 ${isCurrent ? "border-blue-500" : isSelected ? "border-blue-400" : "border-slate-200"} ${data.count > 0 ? "bg-emerald-50" : isCurrent ? "bg-amber-50" : isSelected ? "bg-blue-50" : "bg-white"}`}>
                   <div className="flex min-h-8 items-start justify-between gap-3"><h3 className="min-w-0 break-words font-semibold">{slot.label}</h3><span className={`shrink-0 rounded px-2 py-1 text-xs ${isCurrent ? "bg-amber-200 text-amber-950" : "invisible"}`}>当前时段</span></div>
-                  <div className="flex min-h-11 items-center justify-between gap-2"><span className="whitespace-nowrap text-sm text-slate-500">{data.count} 条</span>{data.mine ? isHistorical
+                  {calendarType !== "tournament" && <><div className="flex min-h-11 items-center justify-between gap-2"><span className="whitespace-nowrap text-sm text-slate-500">{data.count} 条</span>{data.mine ? isHistorical
                     ? <span className="text-right text-xs font-medium text-slate-500">你已登记 · 历史只读</span>
                     : <button type="button" disabled={busy} onClick={(event) => void openDetails({ dayIndex, slotIndex }, event.currentTarget)} className="min-h-11 rounded-md border border-emerald-200 bg-white/80 px-2 text-xs font-semibold text-emerald-900 hover:bg-emerald-100">你已登记 · 管理</button>
                     : <span aria-hidden="true" className="invisible min-h-11 text-xs">你已登记 · 管理</span>}</div>
@@ -592,6 +603,8 @@ export default function Home() {
                     <button type="button" disabled={data.count === 0} onClick={(event) => void openDetails({ dayIndex, slotIndex }, event.currentTarget)} className="min-h-11 rounded-md bg-slate-100 px-3 text-sm font-medium disabled:opacity-50">查看详情</button>
                     <button type="button" aria-pressed={isSelected} disabled={isHistorical || busy} onClick={() => toggleSelected(dayIndex, slotIndex)} className={`min-h-11 rounded-md border px-3 text-sm font-semibold disabled:opacity-40 ${isSelected ? "border-blue-700 bg-blue-700 text-white" : "border-blue-200 text-blue-800"}`}>{isHistorical ? "历史只读" : isSelected ? "已选择" : "选择时段"}</button>
                   </div>
+                  </>}
+                  {calendarType !== "casual" && <CalendarTournamentEntries items={tournaments} weekKey={weekKey} day={dayIndex} slot={slotIndex} />}
                 </article>;
               })}
             </div>
