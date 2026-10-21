@@ -4,6 +4,14 @@ import { fromDatabaseError } from "./errors";
 import { getServerEnv } from "./env";
 
 type RpcName =
+  | "app_tournament_list"
+  | "app_tournament_detail"
+  | "app_tournament_create"
+  | "app_tournament_registration"
+  | "app_tournament_status"
+  | "app_tournament_commit"
+  | "app_tournament_special_commit"
+  | "app_tournament_special_start"
   | "app_auth_identity"
   | "app_device_registrations"
   | "app_register_session"

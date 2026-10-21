@@ -8,6 +8,9 @@ const user = { id: "11111111-1111-4111-8111-111111111111", username: "player_01"
 const admin = { id: "22222222-2222-4222-8222-222222222222", username: "admin_01", isAdmin: true };
 const ok = (data: unknown, status = 200) => ({ status, contentType: "application/json", body: JSON.stringify(data) });
 const emptySlots = (): Slot[] => Array.from({ length: WEEK_CELL_COUNT }, (_, index) => ({ dayIndex: Math.floor(index / SLOT_COUNT), slotIndex: index % SLOT_COUNT, count: 0, mine: false }));
+test.beforeEach(async ({ page }) => {
+  await page.route("**/api/tournaments?*", route => route.fulfill(ok({ items: [], nextOffset: null })));
+});
 
 async function mockHome(page: Page, options: { detailCounts?: boolean; serverTime?: () => string; onSave?: (route: Route, count: number) => Promise<void> } = {}) {
   const serverTime = () => options.serverTime?.() ?? new Date().toISOString();
@@ -632,12 +635,15 @@ test("the live BFF rejects must-change sessions before calling any business RPC"
   await once(fakeSupabase, "listening");
   try {
     const cookie = `lai_pai_session=${"S".repeat(43)}`;
-    for (const path of ["/api/marks?week=2026-09-21", "/api/admin/users"]) {
+    for (const path of ["/api/marks?week=2026-09-21", "/api/admin/users", "/api/tournaments", "/api/tournaments/60000000-0000-4000-8000-000000000001"]) {
       const response = await request.get(path, { headers: { cookie } });
       expect(response.status()).toBe(403);
       expect((await response.json()).error.code).toBe("password_change_required");
     }
-    expect(rpcCalls).toEqual(["app_get_session_context", "app_get_session_context"]);
+    const write = await request.post("/api/tournaments/60000000-0000-4000-8000-000000000001", { headers: { cookie, origin: "http://127.0.0.1:3400" }, data: { action: "publish", revision: 0 } });
+    expect(write.status()).toBe(403);
+    expect((await write.json()).error.code).toBe("password_change_required");
+    expect(rpcCalls).toEqual(Array(5).fill("app_get_session_context"));
   } finally {
     await new Promise<void>((resolve, reject) => fakeSupabase.close((error) => error ? reject(error) : resolve()));
   }
