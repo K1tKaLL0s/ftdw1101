@@ -18,6 +18,14 @@ export async function tournamentWriteLimit(userId: string) {
   await consumeRateLimits([{ key: "account:" + userId + ":tournament-write", limit: 60, windowSeconds: 60 }]);
 }
 export async function actOnTournament(tokenHash: string, id: string, input: TournamentAction) {
+  if (input.action === "edit_registration") {
+    return rpc("app_tournament_edit_registration", { p_session_hash: tokenHash, p_id: id,
+      p_revision: input.revision, p_deadline: input.registration_deadline });
+  }
+  if (input.action === "onsite") {
+    return rpc("app_tournament_onsite", { p_session_hash: tokenHash, p_id: id,
+      p_revision: input.revision, p_name: input.name, p_checked_in: input.checkedIn });
+  }
   if (input.action === "join" || input.action === "leave" || input.action === "checkin") {
     return rpc("app_tournament_registration", { p_session_hash: tokenHash, p_id: id, p_action: input.action,
       p_name: input.action === "join" ? input.name : "", p_entry_id: input.action === "checkin" ? input.entryId : null });
