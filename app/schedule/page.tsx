@@ -359,13 +359,13 @@ export default function Home() {
         setSelected((old) => old.filter((key) => !savedKeys.has(key)));
         setSlotDrafts((old) => Object.fromEntries(Object.entries(old).filter(([key]) => !savedKeys.has(key))));
       }
+      await loadSlots(true);
       if (failure) {
         setNotice(savedKeys.size ? `已保存 ${savedKeys.size} 个时段；未完成的选择和内容已保留，可修正后重试。` : "");
         setError(messageWithFields(failure));
       } else {
         setNotice(`已保存 ${savedKeys.size} 个时段。未提交的选择和内容已保留。`);
       }
-      await loadSlots(true);
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 401) handleUnauthorized();
       else if (submittedWeek === currentWeekKey.current) setError(messageWithFields(reason));

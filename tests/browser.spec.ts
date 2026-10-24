@@ -480,6 +480,7 @@ test("batch reservation keeps per-slot notes and retries only failed groups", as
   await editors.nth(1).getByLabel("备注").fill("单独备注乙");
   await page.screenshot({ path: testInfo.outputPath("batch-reservation.png"), fullPage: true });
   await page.getByRole("button", { name: "保存登记" }).click();
+  await expect(page.getByRole("button", { name: "保存登记", exact: true })).toBeEnabled();
   await expect(page.locator("main > p[role=alert]")).toContainText("第二组失败");
   await expect(page.getByText(/已选 12 个时段/)).toBeVisible();
   await expect(page.locator("fieldset")).toHaveCount(12);
