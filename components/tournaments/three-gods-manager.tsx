@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { canBeginRevival, cardCount, correctionImpact, godNames, hasOpportunity, playerStatusNames, revivalGate, revivalMetric, revivalPlacementIssue, threeGodsPending,
+import { canBeginRevival, cardCount, correctionImpact, godNames, hasOpportunity, playerStatusNames, remainingMainMatches, revivalGate, revivalMetric, revivalPlacementIssue, threeGodsPending,
   type God, type GodGroup, type GodMatch, type GodOutcome, type GodPlayer, type ThreeGodsCommand, type ThreeGodsState } from "@/lib/tournaments/three-gods";
 import { displayEventTime } from "@/lib/tournaments/dates";
 import { buttonClass, inputClass, secondaryClass } from "./shared";
@@ -104,7 +104,7 @@ export function ThreeGodsManager({ state: s, canManage: authorized, busy, now, a
   return <div className="space-y-5" aria-label="三幻神赛事管理">
     <section className="space-y-3 rounded-xl border border-violet-200 bg-violet-50 p-5"><h2 className="text-xl font-bold">三幻神争夺 · {s.grouping === "single" ? "不分组" : "A/B 分组"}</h2>
       <p className="text-sm leading-6">持牌为生命；赢不消耗机会。第一次零牌获得一次额外机会，再以零牌落败则耗尽；初始无卡者开局的一次机会即额外机会。初始神类别独立保存，不随转移改变。</p>
-      <p className="text-sm leading-6">每批实际参赛者完成率达到 70% 即推进，优先配初始神不同者，只让空闲且有机会者入池。正赛奇数剩余者等待，不加分、不扣机会、不虚构参赛轮数。</p>
+      <p className="text-sm leading-6">本组全部对局结束并完成结果登记后才生成下一轮，优先配初始神不同者，只让空闲且有机会者入池。正赛奇数剩余者等待，不加分、不扣机会、不虚构参赛轮数。</p>
       {s.startsAt ? <p className="font-semibold">正赛启动：{displayEventTime(s.startsAt)} · 总时限：{displayEventTime(s.deadlineAt!)}（3.5 小时）{overallExpired && " · 已到时"}</p> : <p className="text-sm font-semibold">先核对初始卡，点击启动正赛后开始 3.5 小时计时。</p>}
       <p className="text-xs leading-5 text-slate-600">BO3 每场 40 分钟；名次赛已进入后允许超过总时限。<a href="https://www.yugioh-card.com/japan/event/regulation/duel/" target="_blank" rel="noreferrer" className="text-blue-800 underline">OCG 对局规定</a> · <a href="https://www.yugioh-card.com/japan/event/regulation/oneduel/" target="_blank" rel="noreferrer" className="text-blue-800 underline">BO1 25 分钟规定</a>。未决胜不从时钟或数据库提交先后自动判胜。</p>
     </section>
@@ -129,9 +129,11 @@ export function ThreeGodsManager({ state: s, canManage: authorized, busy, now, a
       </article>)}</div>
     </section>
     {s.phase !== "setup" && <section className="rounded-xl border border-slate-200 bg-white p-5"><h2 className="text-lg font-bold">匹配批次</h2><div className="mt-3 grid gap-3 sm:grid-cols-2">{groups.map(group => {
-      const b = s.batchRecords.filter(b => b.group === group).at(-1), finished = b ? b.matchIds.filter(id => s.matches.find(m => m.id === id)?.status === "completed").length * 2 : 0;
+      const b = s.batchRecords.filter(b => b.group === group).at(-1), finished = b ? b.matchIds.filter(id => { const m = s.matches.find(m => m.id === id); return m?.status === "completed" && m.result; }).length * 2 : 0;
+      const remaining = remainingMainMatches(s, group);
       return <div key={group} className="rounded-lg bg-slate-50 p-3 text-sm"><p className="font-semibold">{groupName(group)} · 批次 {b?.number ?? 0}{s.stoppedGroups.includes(group) && " · 已停止新配对"}</p><p className="mt-1">本批完成 {finished}/{b?.participantIds.length ?? 0} 位实际参赛者{b ? `（${Math.round(finished / b.participantIds.length * 100)}%）` : ""}</p>
-        {canManage && !["complete", "finals", "placements"].includes(s.phase) && <button disabled={busy || s.stoppedGroups.includes(group)} className={`${secondaryClass} mt-2`} onClick={() => void send({ kind: "pair", group, note: "裁判刷新匹配池与总时限，达到条件则生成下一批" })}>刷新资格并尝试下一批</button>}</div>;
+        {remaining > 0 && <p role="status" className="mt-2 text-amber-900">本组尚有 {remaining} 场对局未结束并完成结果登记，全部登记后才生成下一轮。</p>}
+        {canManage && !["complete", "finals", "placements"].includes(s.phase) && <button disabled={busy || s.stoppedGroups.includes(group) || remaining > 0} className={`${secondaryClass} mt-2`} onClick={() => void send({ kind: "pair", group, note: "裁判刷新匹配池与总时限，全部对局登记后生成下一批" })}>刷新资格并尝试下一批</button>}</div>;
     })}</div></section>}
     {s.phase !== "setup" && <section className="space-y-3 rounded-xl border border-slate-200 bg-white p-5"><h2 className="text-lg font-bold">全场一次复活赛</h2>
       <p className="text-sm leading-6">全部初始无卡者完成前三次安排后统一开启；已出局者等待，不强行派对。只纳入前三安排内耗尽机会的初始无卡者，随机打一轮 BO3；仅复活赛轮空记 1.5 分。按「复活赛分 + 正赛分 ×60%」选全场一人，综合分只用于排名，不改写正赛积分。</p>
