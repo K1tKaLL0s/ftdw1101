@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyThreeGodsCommand, bo3Points, cardCount, correctionImpact, hasOpportunity, rankSimultaneousCandidates, revivalGate, revivalMetric, specialRoster, type God, type GodMatch, type ThreeGodsCommand, type ThreeGodsState } from "../lib/tournaments/three-gods";
+import { applyThreeGodsCommand, bo3Points, cardCount, correctionImpact, hasOpportunity, rankSimultaneousCandidates, remainingMainMatches, revivalGate, revivalMetric, specialRoster, type God, type GodMatch, type ThreeGodsCommand, type ThreeGodsState } from "../lib/tournaments/three-gods";
 
 let serial = 0;
 const id = (n: number) => `40000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -74,15 +74,57 @@ test("initial zero-card players have one extra life; a win does not consume it; 
   assert.ok(s.rulingMessages.some(message => message.includes("额外机会")));
 });
 
-test("70 percent uses actual current-batch participants and never schedules an unfinished player twice", () => {
+test("second round waits for every current match result and direct pair cannot advance at 75 percent", () => {
   let s = setup(["slifer", "ra", "obelisk", "slifer", "ra", "obelisk", "slifer", "ra"]);
   const first = [...active(s)]; assert.equal(first.length, 4);
   s = result(s, first[0], "draw"); s = result(s, first[1], "draw"); assert.equal(s.batches.all, 1);
-  s = result(s, first[2], "draw"); assert.equal(s.batches.all, 2);
-  const unfinished = new Set([first[3].aId, first[3].bId]);
-  assert.equal(s.batchRecords.at(-1)!.participantIds.some(id => unfinished.has(id)), false);
+  s = result(s, first[2], "draw"); assert.equal(s.batches.all, 1);
+  assert.equal(remainingMainMatches(s, "all"), 1);
+  const before = structuredClone(s);
+  assert.throws(() => command(s, { kind: "pair", group: "all", note }), /尚有 1 场/);
+  assert.deepEqual(s, before);
+  s = result(s, first[3], "draw"); assert.equal(s.batches.all, 2);
+  assert.equal(s.matches.filter(m => m.batch === 1).every(m => m.status === "completed" && m.result), true);
   const playing = active(s).flatMap(m => [m.aId, m.bId]); assert.equal(playing.length, new Set(playing).size);
-  assert.equal(s.players.find(p => p.id === first[3].aId)!.assignedMatches, 1);
+  assert.equal(s.players.find(p => p.id === first[3].aId)!.assignedMatches, 2);
+});
+
+test("next round gate includes unfinished older batches without changing published matches", () => {
+  let s = setup(["slifer", "ra", "obelisk", "slifer", "ra", "obelisk", "slifer", "ra"]);
+  const first = [...active(s)];
+  for (const m of first.slice(0, 3)) s = result(s, m, "draw");
+  // Existing production state may already contain a new batch created by the former 70% rule.
+  const a = s.players.find(p => p.id === first[0].aId)!, b = s.players.find(p => p.id === first[0].bId)!;
+  const legacy: GodMatch = { ...structuredClone(first[0]), id: "legacy:all:2:1", batch: 2, aParticipation: ++a.assignedMatches, bParticipation: ++b.assignedMatches };
+  s.matches.push(legacy); s.batches.all = 2;
+  s.batchRecords.push({ group: "all", number: 2, participantIds: [a.id, b.id], matchIds: [legacy.id] });
+  const oldMatch = structuredClone(s.matches.find(m => m.id === first[3].id));
+  s = result(s, legacy, "draw");
+  assert.equal(s.batches.all, 2); assert.equal(remainingMainMatches(s, "all"), 1);
+  assert.deepEqual(s.matches.find(m => m.id === first[3].id), oldMatch);
+  assert.throws(() => command(s, { kind: "pair", group: "all", note }), /尚有 1 场/);
+  s = result(s, first[3], "draw"); assert.equal(s.batches.all, 3);
+});
+
+test("A/B rounds advance independently and waiting odd entrants do not count as unfinished matches", () => {
+  let s = setup(["slifer", "ra", "obelisk", "slifer", "ra", "obelisk"], "ab");
+  const firstA = active(s).find(m => m.group === "A")!, firstB = active(s).find(m => m.group === "B")!;
+  assert.equal(remainingMainMatches(s, "A"), 1); assert.equal(remainingMainMatches(s, "B"), 1);
+  s = result(s, firstA, "draw");
+  assert.equal(s.batches.A, 2); assert.equal(s.batches.B, 1);
+  assert.deepEqual(s.matches.find(m => m.id === firstB.id), firstB);
+  assert.equal(s.players.filter(p => p.group === "A" && p.assignedMatches === 0).length <= 1, true);
+  assert.throws(() => command(s, { kind: "pair", group: "B", note }), /尚有 1 场/);
+});
+
+test("completed without registered result and pending ruling both block the next round", () => {
+  for (const status of ["completed", "ruling_pending"] as const) {
+    const s = setup(["slifer", "ra", "obelisk", "slifer"]);
+    s.matches[0].status = status;
+    assert.equal(s.matches[0].result, null);
+    assert.equal(remainingMainMatches(s, "all"), 2);
+    assert.throws(() => command(s, { kind: "pair", group: "all", note }), /尚有 2 场/);
+  }
 });
 
 test("random pairing prefers different initial gods; odd main entrant waits with no bye points or invented round", () => {

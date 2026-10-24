@@ -179,6 +179,42 @@ test("special roster is checked-in only; score/card transaction has revision pro
   await assert.rejects(call("app_tournament_special_commit", [outsider, id, after.tournament.revision, JSON.stringify(s), replay.key, s.commands[replay.key]]), /forbidden/);
 });
 
+test("all main results must be registered before the next batch and concurrent last results cannot duplicate it", async () => {
+  const id = await create("published", 8, { format: "three_gods", special_grouping: "single" });
+  await eventDay(id);
+  for (let i = 1; i <= 4; i++) await onsite(id, (await detail(id)).tournament.revision, `完整轮次选手${i}`, true);
+  let d = await detail(id);
+  await call("app_tournament_special_start", [owner, id, d.tournament.revision, JSON.stringify(specialRoster("single", d.entrants))]);
+  let serial = 100;
+  const key = () => `52000000-0000-4000-8000-${String(++serial).padStart(12, "0")}`;
+  const save = async (command: Parameters<typeof applyThreeGodsCommand>[2]) => {
+    d = await detail(id); const commandId = key();
+    const state = applyThreeGodsCommand(d.tournament.special_state!, commandId, command, () => 0.5);
+    await call("app_tournament_special_commit", [owner, id, d.tournament.revision, JSON.stringify(state), commandId, state.commands[commandId]]);
+  };
+  for (const entry of d.entrants) await save({ kind: "initial", playerId: entry.id, initialGod: "slifer", group: "all", note: "现场确认初始幻神" });
+  await save({ kind: "begin_main", note: "确认全部选手开启正赛" });
+  d = await detail(id); const first = d.tournament.special_state!.matches;
+  assert.equal(first.length, 2);
+  await save({ kind: "result", matchId: first[0].id, outcome: "draw", aWins: 0, bWins: 0, note: "确认第一场最终结果" });
+  d = await detail(id); const original = d.tournament.special_state!;
+  assert.equal(original.batches.all, 1);
+  assert.throws(() => applyThreeGodsCommand(original, key(), { kind: "pair", group: "all", note: "直接请求下一轮配对" }, () => 0.5), /未完成|结果登记/);
+  assert.deepEqual((await detail(id)).tournament.special_state, original);
+  const finalResult = { kind: "result" as const, matchId: first[1].id, outcome: "draw" as const, aWins: 0, bWins: 0, note: "确认最后一场最终结果" };
+  const firstKey = key(), secondKey = key();
+  const next = applyThreeGodsCommand(original, firstKey, finalResult, () => 0.5);
+  const concurrent = applyThreeGodsCommand(original, secondKey, finalResult, () => 0.5);
+  assert.equal(next.batches.all, 2);
+  assert.ok(next.matches.filter(m => m.batch === 1).every(m => m.status === "completed" && m.result));
+  await call("app_tournament_special_commit", [owner, id, d.tournament.revision, JSON.stringify(next), firstKey, next.commands[firstKey]]);
+  await assert.rejects(call("app_tournament_special_commit", [owner, id, d.tournament.revision, JSON.stringify(concurrent), secondKey, concurrent.commands[secondKey]]), /revision conflict/);
+  await call("app_tournament_special_commit", [owner, id, d.tournament.revision, JSON.stringify(next), firstKey, next.commands[firstKey]]);
+  const persisted = await detail(id);
+  assert.equal(persisted.tournament.revision, d.tournament.revision + 1);
+  assert.deepEqual(persisted.tournament.special_state, next);
+});
+
 test("only organizer/admin may close or reopen registration before pool locking, with revision and schedule checks", async () => {
   const id = await create();
   const existing = await registration(id, player, "join", "保留报名");

@@ -78,6 +78,7 @@ export function specialRoster(grouping: "ab" | "single", entrants: { id: string;
 export const cardCount = (p: GodPlayer) => Object.values(p.stock).reduce((a, b) => a + b, 0);
 export const hasOpportunity = (p: GodPlayer) => p.initialAssigned && (cardCount(p) > 0 || p.extraLife);
 const busyIds = (s: ThreeGodsState) => new Set(s.matches.filter(m => m.status !== "completed").flatMap(m => [m.aId, m.bId]));
+export const remainingMainMatches = (s: ThreeGodsState, group: GodGroup) => s.matches.filter(m => m.kind === "main" && m.group === group && (m.status !== "completed" || !m.result)).length;
 function firstZero(p: GodPlayer) { if (p.initialAssigned && !cardCount(p) && !p.zeroBonusGranted) { p.zeroBonusGranted = true; p.extraLife = true; } }
 function refreshPlayers(s: ThreeGodsState) {
   const busy = busyIds(s);
@@ -131,8 +132,8 @@ function newMatch(s: ThreeGodsState, id: string, kind: GodMatch["kind"], group: 
 function batch(s: ThreeGodsState, group: GodGroup, commandId: string, random: () => number, now: string): boolean {
   if (!["main", "candidate_wait"].includes(s.phase) || s.stoppedGroups.includes(group)) return false;
   if (s.deadlineAt && Date.parse(now) >= Date.parse(s.deadlineAt)) { s.phase = "time_up"; return false; }
-  const last = s.batchRecords.filter(b => b.group === group).at(-1);
-  if (last && last.matchIds.filter(id => s.matches.find(m => m.id === id)?.status === "completed").length * 20 < last.participantIds.length * 7) return false;
+  // Include older overlapping batches already published under the former completion threshold.
+  if (remainingMainMatches(s, group)) return false;
   const busy = busyIds(s);
   const pool = shuffled(s.players.filter(p => p.group === group && p.hold === "none" && hasOpportunity(p) && !busy.has(p.id)
     && !(s.revival.status !== "idle" && s.revival.status !== "complete" && s.revival.eligibleIds.includes(p.id))), random);
@@ -278,7 +279,10 @@ export function applyThreeGodsCommand(original: ThreeGodsState, commandId: strin
     for (const group of s.grouping === "single" ? ["all" as const] : ["A" as const, "B" as const]) batch(s, group, commandId, random, now);
     event.players = s.players.map(p => p.id); event.facts = { startsAt: now, deadlineAt: s.deadlineAt };
   } else if (c.kind === "pair") {
-    const generated = batch(s, c.group, commandId, random, now); check(generated || s.phase === "time_up", "未达本批 70%、已有冠军候选或空闲有机会者不足两人，未生成新配对。");
+    const remaining = remainingMainMatches(s, c.group);
+    const generated = batch(s, c.group, commandId, random, now); check(generated || s.phase === "time_up", remaining
+      ? `本组尚有 ${remaining} 场对局未结束并完成结果登记，不能开始下一轮。`
+      : "已有冠军候选或空闲有机会者不足两人，未生成新配对。");
     event.facts = { group: c.group, batch: s.batches[c.group], phase: s.phase };
   } else if (c.kind === "arrangement") {
     const p = get(c.playerId); available(p); check(p.initialAssigned && p.initialGod === null && p.initialArrangements < 3, "仅用于初始无卡选手尚未完成的前三次安排。");
