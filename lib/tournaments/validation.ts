@@ -29,6 +29,8 @@ export const tournamentCreateSchema = z.object({
 });
 const revision = z.number().int().min(0);
 export const tournamentActionSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("late_onsite"), revision, name: z.string().trim().min(1).max(30), checkedIn: z.boolean(), initialGod: z.enum(["slifer", "obelisk", "ra"]).nullable(), group: z.enum(["all", "A", "B"]) }),
+  z.object({ action: z.literal("late_checkin"), revision, entryId: z.uuid(), initialGod: z.enum(["slifer", "obelisk", "ra"]).nullable(), group: z.enum(["all", "A", "B"]) }),
   z.object({ action: z.literal("edit_registration"), revision, registration_deadline: z.iso.datetime({ offset: true }) }),
   z.object({ action: z.literal("onsite"), revision, name: z.string().trim().min(1).max(30), checkedIn: z.boolean() }),
   z.object({ action: z.literal("special"), revision, commandId: z.uuid(), command: threeGodsCommandSchema }),

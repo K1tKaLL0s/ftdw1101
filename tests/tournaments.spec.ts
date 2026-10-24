@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { advanceToCut, nextSwissRound, recordResult, startTournament } from "../lib/tournaments/engine";
-import { specialRoster } from "../lib/tournaments/three-gods";
+import { applyThreeGodsCommand, specialRoster } from "../lib/tournaments/three-gods";
 import { getCurrentWeekKey, shiftDayKey } from "../lib/week";
 import type { Tournament, TournamentDetail } from "../lib/tournaments/types";
 
@@ -184,6 +184,59 @@ test("registration management is hidden from participants and locked standard or
   await expect(page.getByLabel("修改预报名截止时间", { exact: true })).toHaveCount(0);
   await expect(page.getByLabel("现场选手昵称", { exact: true })).toHaveCount(0);
   expect(JSON.stringify(data.tournament.special_state)).toBe(specialState);
+});
+
+test("post-start onsite entries wait for explicit check-in and initial cards without changing published matches", async ({ page }) => {
+  const now = "2099-10-24T05:00:00Z";
+  await page.clock.setFixedTime(new Date(now));
+  const people = [1, 2].map(i => ({ id: entryId(i), name: `在战选手${i}`, status: "checked_in" as const }));
+  let special = specialRoster("single", people);
+  for (let i = 0; i < people.length; i++) special = applyThreeGodsCommand(special, entryId(20 + i), { kind: "initial", playerId: people[i].id, group: "all", initialGod: "slifer", note: "现场确认初始卡片" }, () => 0.5, now);
+  special = applyThreeGodsCommand(special, entryId(22), { kind: "begin_main", note: "确认名单后开始正赛" }, () => 0.5, now);
+  const publishedMatches = structuredClone(special.matches);
+  const data: TournamentDetail = { tournament: tournament({ format: "three_gods", status: "running", special_state: special, starts_at: now,
+    registration_deadline: "2099-10-24T04:30:00Z", entry_count: 2, checked_in_count: 2 }), entrants: people, mine: null, canManage: true };
+  const submitted: Record<string, unknown>[] = [];
+  await mockDetail(page, data, input => {
+    submitted.push(input);
+    const entry = input.action === "late_onsite"
+      ? { id: entryId(data.entrants.length + 1), name: String(input.name), status: "preregistered" as const }
+      : data.entrants.find(row => row.id === input.entryId)!;
+    if (input.action === "late_onsite") { data.entrants.push(entry); data.tournament.entry_count++; }
+    if (input.action === "late_checkin" || input.checkedIn) {
+      entry.status = "checked_in";
+      const player = specialRoster("single", [entry]).players[0];
+      const initialGod = input.initialGod as "slifer" | "obelisk" | "ra" | null;
+      player.initialAssigned = true; player.initialGod = initialGod;
+      if (initialGod) player.stock[initialGod] = 1;
+      player.extraLife = initialGod === null; player.zeroBonusGranted = initialGod === null;
+      data.tournament.special_state!.players.push(player); data.tournament.checked_in_count++;
+    }
+  });
+  await page.goto(`/tournaments/${eventId}`);
+  const onsite = page.getByRole("form", { name: "开赛后补录选手", exact: true });
+  const arrival = onsite.getByRole("checkbox", { name: "已核对本人到场并加入后续匹配", exact: true });
+  await expect(arrival).not.toBeChecked();
+  await onsite.getByLabel("开赛后选手昵称", { exact: true }).fill("迟到待报到");
+  await onsite.getByRole("button", { name: "保存开赛后补录", exact: true }).click();
+  const checkin = page.getByRole("form", { name: "开赛后报到 迟到待报到", exact: true });
+  await expect(checkin).toBeVisible();
+  expect(submitted[0]).toMatchObject({ action: "late_onsite", revision: 0, name: "迟到待报到", checkedIn: false, group: "all" });
+  expect(data.tournament.special_state!.players).toHaveLength(2);
+  expect(data.tournament.special_state!.matches).toEqual(publishedMatches);
+  await checkin.getByRole("combobox", { name: "入池初始幻神", exact: true }).selectOption("obelisk");
+  await checkin.getByRole("button", { name: "确认报到并加入后续匹配", exact: true }).click();
+  await expect(checkin).toHaveCount(0);
+  expect(submitted[1]).toMatchObject({ action: "late_checkin", revision: 1, entryId: entryId(3), initialGod: "obelisk", group: "all" });
+  expect(data.tournament.special_state!.players[2]).toMatchObject({ initialGod: "obelisk", points: 0, completedMatches: 0, assignedMatches: 0, revivalEligible: false });
+  await onsite.getByLabel("开赛后选手昵称", { exact: true }).fill("迟到初始无卡");
+  await arrival.check();
+  await onsite.getByRole("combobox", { name: "入池初始幻神", exact: true }).selectOption("none");
+  await onsite.getByRole("button", { name: "保存开赛后补录", exact: true }).click();
+  await expect(page.getByText(/预报名总数 4\/16 · 已报到（未退赛）4/)).toBeVisible();
+  expect(submitted[2]).toMatchObject({ action: "late_onsite", revision: 2, checkedIn: true, initialGod: null, group: "all" });
+  expect(data.tournament.special_state!.players[3]).toMatchObject({ initialAssigned: true, initialGod: null, extraLife: true, points: 0, completedMatches: 0, revivalEligible: false });
+  expect(data.tournament.special_state!.matches).toEqual(publishedMatches);
 });
 
 test("onsite registration cannot be submitted before the event local date", async ({ page }) => {

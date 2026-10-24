@@ -6,6 +6,7 @@ import { displayEventTime, localEventTime } from "@/lib/tournaments/dates";
 import { formatNames, statusNames, type Tournament, type TournamentDetail } from "@/lib/tournaments/types";
 import { FormatRules, TournamentHeader, buttonClass, secondaryClass, inputClass, errorMessage, useTournamentData } from "@/components/tournaments/shared";
 import { ThreeGodsManager } from "@/components/tournaments/three-gods-manager";
+import { LateRegistration } from "@/components/tournaments/late-registration";
 
 const resultNames: Record<Result, string> = { a_win: "A 胜", b_win: "B 胜", draw: "平局", double_loss: "双方判负", bye: "轮空晋级", void: "空签 / 双方退赛" };
 const bracketNames = { swiss: "瑞士轮", cut: "晋级单败淘汰赛", winners: "胜者组", losers: "败者组", final: "总决赛 · 单场无 reset" };
@@ -114,7 +115,7 @@ export default function TournamentDetailPage({ params }: { params: Promise<{ id:
       <p className="text-sm leading-6"><strong>完全同分办法：</strong>{t.tie_break_policy}</p>{t.extra_rules && <p className="whitespace-pre-wrap break-words text-sm leading-6"><strong>补充规则：</strong>{t.extra_rules}</p>}
     </section>
     {t.status === "published" && <section className="mb-5 rounded-xl border border-slate-200 bg-white p-5"><h2 className="text-lg font-bold">预报名与报到</h2>
-      <p className="my-3 text-sm leading-6 text-slate-600">预报名不会自动进入选手池。请在赛事当地日期当天到场，由发布者确认报到。未预报名者可在锁定选手池前由发布者现场补录；开赛后停止补录，已公布配对保持不变。</p>
+      <p className="my-3 text-sm leading-6 text-slate-600">预报名不会自动进入选手池。请在赛事当地日期当天到场，由发布者确认报到。未预报名者可由发布者现场补录；三幻神正赛开赛后可在允许阶段补录到后续匹配，其他赛制锁池后停止补录。已公布配对保持不变。</p>
       {mine && mine.status !== "withdrawn" ? <div className="flex flex-wrap items-center gap-3"><p className="font-medium">你已{mine.status === "checked_in" ? "完成正式报到" : "预报名，等待当天报到"}：{mine.name}</p><button disabled={busy} className={secondaryClass} onClick={() => void act({ action: "leave" })}>撤回本人报名</button></div>
         : registrationOpen ? <form className="space-y-3" onSubmit={event => { event.preventDefault(); void act({ action: "join", name }); }}>
           <label className="block max-w-md text-sm font-semibold">参赛显示昵称<input value={name} required maxLength={30} onChange={event => setName(event.target.value)} className={inputClass} disabled={busy} /></label>
@@ -129,6 +130,7 @@ export default function TournamentDetailPage({ params }: { params: Promise<{ id:
     </section>
     {data.canManage && <section className="mb-5 space-y-4 rounded-xl border border-blue-200 bg-blue-50 p-5"><h2 className="text-lg font-bold">组织者操作</h2>
       {["draft", "published"].includes(t.status) && !state && !t.special_state && <RegistrationManagement key={`${t.id}:${t.registration_deadline}`} tournament={t} eventDay={eventDay} busy={busy} act={act} />}
+      <LateRegistration detail={data} busy={busy} now={now} act={act} />
       {t.status === "draft" && <button disabled={busy} onClick={() => void act({ action: "publish" })} className={buttonClass}>发布并开放预报名</button>}
       {t.status === "published" && <div className="space-y-3"><label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={startConfirmed} onChange={event => setStartConfirmed(event.target.checked)} className="mt-1" />我已核对现场名单。立即截止报名，仅将 {t.checked_in_count} 名已报到者加入选手池，锁定规则与初始种子。</label><button disabled={busy || !startConfirmed || t.checked_in_count < 2} className={buttonClass} onClick={() => void act({ action: "start" })}>{t.format === "three_gods" ? "截止报名并锁定三幻神选手池" : "截止报名并正式开赛"}</button><p className="text-xs text-slate-600">未报到者不会上场。{t.format === "three_gods" ? "锁定后核对初始神，再单独启动正赛计时与匹配。" : "人数不足所选轮数或晋级人数时，开赛会被拒绝。"}</p></div>}
       {state?.phase === "swiss" && <><button disabled={busy} onClick={() => void act({ action: "next_swiss" })} className={buttonClass}>{state.currentRound >= t.swiss_rounds ? "结束瑞士轮并核对晋级" : "确认本轮结束，生成下一轮"}</button>

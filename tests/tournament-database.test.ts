@@ -32,6 +32,8 @@ const detail = (id: string, session = owner) => call<Detail>("app_tournament_det
 const registration = (id: string, session: string, action: string, name = "", entryId: string | null = null) => call<{ id: string }>("app_tournament_registration", [session, id, action, name, entryId]);
 const editDeadline = (id: string, revision: number, deadline: string | null, session = owner) => call<boolean>("app_tournament_edit_registration", [session, id, revision, deadline]);
 const onsite = (id: string, revision: number, name: string, checkedIn: boolean | null, session = owner) => call<{ id: string }>("app_tournament_onsite", [session, id, revision, name, checkedIn]);
+const late = (id: string, revision: number, name: string, checkedIn: boolean, initialGod: string | null = "obelisk", group = "all", entryId: string | null = null, session = owner) =>
+  call<{ id: string }>("app_tournament_late_entry", [session, id, revision, entryId, name, checkedIn, initialGod, group]);
 const eventDay = (id: string) => db.query("update public.tournaments set starts_at=now(),registration_deadline=now() where id=$1", [id]);
 async function registrationSnapshot() {
   return (await db.query<{ value: unknown }>(`select jsonb_build_object(
@@ -310,4 +312,122 @@ test("new registration RPCs stay service-only and require a valid opaque applica
       assert.equal(privilege.rows[0].allowed, role === "service_role");
     }
   }
+});
+
+async function lateFixture(capacity = 8, grouping: "single" | "ab" = "single", startMain = true) {
+  const id = await create("published", capacity, { format: "three_gods", special_grouping: grouping });
+  const sessions = grouping === "ab" ? [owner, outsider, player, admin] : [owner, outsider];
+  const people = [];
+  for (let i = 0; i < sessions.length; i++) people.push(await registration(id, sessions[i], "join", `开赛选手${i + 1}`));
+  const pending = grouping === "single" && capacity > 2 ? await registration(id, player, "join", "原待报到选手") : null;
+  await eventDay(id);
+  for (const entry of people) await registration(id, owner, "checkin", "", entry.id);
+  let d = await detail(id), state = specialRoster(grouping, d.entrants.filter(e => e.status === "checked_in"));
+  await call("app_tournament_special_start", [owner, id, d.tournament.revision, JSON.stringify(state)]);
+  let serial = 800;
+  const save = async (command: Parameters<typeof applyThreeGodsCommand>[2]) => {
+    d = await detail(id); const key = `90000000-0000-4000-8000-${String(++serial).padStart(12, "0")}`;
+    state = applyThreeGodsCommand(d.tournament.special_state!, key, command, () => 0.5);
+    await call("app_tournament_special_commit", [owner, id, d.tournament.revision, JSON.stringify(state), key, state.commands[key]]);
+  };
+  for (let i = 0; i < people.length; i++) await save({ kind: "initial", playerId: people[i].id, initialGod: "slifer", group: grouping === "single" ? "all" : i < 2 ? "A" : "B", note: "现场确认初始神与分组" });
+  if (startMain) await save({ kind: "begin_main", note: "现场正式启动正赛配对" });
+  return { id, pending, detail: await detail(id) };
+}
+
+test("late admission preserves live matches and appends only checked-in players for future real pairing", async () => {
+  const f = await lateFixture(); const id = f.id; const original = f.detail.tournament.special_state!;
+  const pending = await late(id, f.detail.tournament.revision, "补录待报到", false, null);
+  let d = await detail(id);
+  assert.deepEqual(d.tournament.special_state, original, "pending registration cannot enter or alter the running pool");
+  assert.equal(d.entrants.find(e => e.id === pending.id)!.status, "preregistered");
+  const arrived = await late(id, d.tournament.revision, "补录已到场", true, "obelisk");
+  d = await detail(id); let state = d.tournament.special_state!;
+  const newcomer = state.players.find(p => p.id === arrived.id)!;
+  assert.equal(newcomer.initialAssigned, true); assert.equal(newcomer.initialGod, "obelisk");
+  assert.deepEqual(newcomer.stock, { slifer: 0, obelisk: 1, ra: 0 });
+  assert.equal(newcomer.points, 0); assert.equal(newcomer.revivalPoints, 0);
+  assert.equal(newcomer.assignedMatches, 0); assert.equal(newcomer.completedMatches, 0);
+  assert.equal(newcomer.mainMatches, 0); assert.equal(newcomer.initialArrangements, 0);
+  assert.equal(newcomer.revivalEligible, false); assert.equal(newcomer.extraLife, false);
+  assert.deepEqual(state.matches, original.matches); assert.deepEqual(state.batchRecords, original.batchRecords);
+  assert.deepEqual(state.players.slice(0, original.players.length), original.players);
+  assert.equal(state.startsAt, original.startsAt); assert.equal(state.deadlineAt, original.deadlineAt);
+  assert.deepEqual(state.revival, original.revival);
+  assert.equal(state.events.at(-1)!.kind, "late_entry");
+  await late(id, d.tournament.revision, "", true, null, "all", f.pending!.id);
+  d = await detail(id); state = d.tournament.special_state!;
+  const noCard = state.players.find(p => p.id === f.pending!.id)!;
+  assert.equal(noCard.extraLife, true); assert.equal(noCard.zeroBonusGranted, true);
+  assert.equal(noCard.revivalEligible, false); assert.equal(noCard.initialArrangements, 0);
+  assert.deepEqual(state.matches, original.matches);
+  const oldMatch = original.matches[0], key = "90000000-0000-4000-8000-000000009001";
+  const stale = applyThreeGodsCommand(original, key, { kind: "result", matchId: oldMatch.id, outcome: "a_win", aWins: 2, bWins: 0, note: "现场确认最终比分" }, () => 0.5);
+  await assert.rejects(call("app_tournament_special_commit", [owner, id, f.detail.tournament.revision, JSON.stringify(stale), key, stale.commands[key]]), /revision conflict/);
+  const next = applyThreeGodsCommand(state, key, { kind: "result", matchId: oldMatch.id, outcome: "a_win", aWins: 2, bWins: 0, note: "现场确认最终比分" }, () => 0.5);
+  assert.equal(next.matches[0].aId, oldMatch.aId); assert.equal(next.matches[0].bId, oldMatch.bId);
+  assert.equal(next.matches[0].result!.aPoints, 4);
+  assert.ok(next.matches.slice(original.matches.length).some(m => [m.aId, m.bId].includes(arrived.id)), "the newcomer participates only when the engine creates its next batch");
+  await call("app_tournament_special_commit", [owner, id, d.tournament.revision, JSON.stringify(next), key, next.commands[key]]);
+  assert.deepEqual((await detail(id)).tournament.special_state, next);
+  const committed = await detail(id);
+  await late(id, committed.tournament.revision, "已有赛果后补录", true, "ra");
+  assert.deepEqual((await detail(id)).tournament.special_state!.matches, next.matches, "both completed and currently running matches remain byte-for-byte equivalent");
+});
+
+test("late admission enforces ownership, duplicate/capacity and revision checks without duplicate pool entries", async () => {
+  const f = await lateFixture(5); const id = f.id; let d = f.detail;
+  await assert.rejects(late(id, d.tournament.revision, "越权补录", true, null, "all", null, outsider), /forbidden/);
+  await assert.rejects(late(id, d.tournament.revision, "开赛选手1", true), /duplicate entry name/);
+  await assert.rejects(late(id, d.tournament.revision, "配置不符", true, "obelisk", "A"), /invalid late entry configuration/);
+  await late(id, d.tournament.revision, "AliceLate", false);
+  await assert.rejects(late(id, d.tournament.revision, "AliceLate", false), /revision conflict/);
+  d = await detail(id);
+  await assert.rejects(late(id, d.tournament.revision, " ＡＬＩＣＥＬＡＴＥ ", true), /duplicate entry name/);
+  const outcomes = await Promise.allSettled([late(id, d.tournament.revision, "最后名额甲", true), late(id, d.tournament.revision, "最后名额乙", true, "ra", "all", null, admin)]);
+  assert.equal(outcomes.filter(r => r.status === "fulfilled").length, 1);
+  d = await detail(id); assert.equal(d.tournament.entry_count, 5);
+  await assert.rejects(late(id, d.tournament.revision, "超额补录", true), /full/);
+  await late(id, d.tournament.revision, "", true, null, "all", f.pending!.id);
+  d = await detail(id);
+  await assert.rejects(late(id, d.tournament.revision, "", true, null, "all", f.pending!.id), /already checked in/);
+  assert.equal(d.tournament.special_state!.players.filter(p => p.id === f.pending!.id).length, 1);
+  assert.equal(d.tournament.checked_in_count, 4);
+  const grants = await db.query<{ anon: boolean; authenticated: boolean; service: boolean }>(`select
+    has_function_privilege('anon','public.app_tournament_late_entry(text,uuid,integer,uuid,text,boolean,text,text)','execute') anon,
+    has_function_privilege('authenticated','public.app_tournament_late_entry(text,uuid,integer,uuid,text,boolean,text,text)','execute') authenticated,
+    has_function_privilege('service_role','public.app_tournament_late_entry(text,uuid,integer,uuid,text,boolean,text,text)','execute') service`);
+  assert.deepEqual(grants.rows[0], { anon: false, authenticated: false, service: true });
+});
+
+test("late admission rejects fixed brackets, closed revival/medal/time windows and stopped groups", async () => {
+  const normal = await create();
+  await assert.rejects(late(normal, 0, "固定签表不追加", true), /unsupported format/);
+  const f = await lateFixture(); const id = f.id; const saved = f.detail;
+  for (const change of [
+    { phase: "candidate_wait" }, { phase: "placements" }, { phase: "finals" }, { phase: "complete" },
+    { revival: { ...saved.tournament.special_state!.revival, status: "playing" } },
+    { deadlineAt: new Date(0).toISOString() }, { deadlineAt: null },
+    { stoppedGroups: ["all"] }, { selectedCandidates: { all: [] } },
+  ]) {
+    const changed = { ...saved.tournament.special_state!, ...change };
+    await db.query("update public.tournaments set special_state=$2::jsonb where id=$1", [id, JSON.stringify(changed)]);
+    await assert.rejects(late(id, saved.tournament.revision, "窗口关闭不追加", true), /window closed/);
+  }
+  await db.query("update public.tournaments set special_state=$2::jsonb,starts_at=now()-interval '1 day',registration_deadline=now()-interval '1 day' where id=$1", [id, JSON.stringify(saved.tournament.special_state)]);
+  await assert.rejects(late(id, saved.tournament.revision, "异日不追加", true), /only on event day/);
+  const ab = await lateFixture(8, "ab");
+  const s = { ...ab.detail.tournament.special_state!, stoppedGroups: ["A"] };
+  await db.query("update public.tournaments set special_state=$2::jsonb where id=$1", [ab.id, JSON.stringify(s)]);
+  await assert.rejects(late(ab.id, ab.detail.tournament.revision, "A组已停止", true, "ra", "A"), /window closed/);
+  const entry = await late(ab.id, ab.detail.tournament.revision, "B组仍可补录", true, "ra", "B");
+  const after = await detail(ab.id);
+  assert.equal(after.tournament.special_state!.players.find(p => p.id === entry.id)!.group, "B");
+  assert.deepEqual(after.tournament.special_state!.matches, s.matches);
+  const setup = await lateFixture(8, "single", false);
+  await late(setup.id, setup.detail.tournament.revision, "锁池未匹配补录", true, null);
+  const setupAfter = await detail(setup.id);
+  assert.equal(setupAfter.tournament.special_state!.phase, "setup");
+  assert.equal(setupAfter.tournament.special_state!.matches.length, 0);
+  assert.equal(setupAfter.tournament.special_state!.players.at(-1)!.extraLife, true);
 });

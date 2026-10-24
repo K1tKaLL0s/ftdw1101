@@ -6,6 +6,16 @@ import { calendarCell, localEventTime } from "../lib/tournaments/dates";
 const valid = () => ({ title: "校园杯", location: "活动室", format: "swiss_cut", capacity: 16, swiss_rounds: 3, top_cut: 4,
   timezone: "Asia/Shanghai", starts_at: new Date(Date.now() + 86_400_000).toISOString(),
   registration_deadline: new Date(Date.now() + 3600_000).toISOString(), tie_break_policy: "现场公开抽签", status: "published" });
+test("late entry commands require explicit initial issuance, group, revision and check-in state", () => {
+  const entryId = "90000000-0000-4000-8000-000000000001";
+  const command = { action: "late_onsite", revision: 1, name: " 晚到选手 ", checkedIn: false, initialGod: null, group: "all" };
+  assert.equal(tournamentActionSchema.parse(command).action, "late_onsite");
+  assert.equal(tournamentActionSchema.safeParse({ action: "late_checkin", revision: 1, entryId, initialGod: "ra", group: "B" }).success, true);
+  for (const change of [{ checkedIn: undefined }, { initialGod: undefined }, { initialGod: "invented" }, { group: "C" }, { revision: -1 }, { name: " " }]) {
+    assert.equal(tournamentActionSchema.safeParse({ ...command, ...change }).success, false);
+  }
+  assert.equal(tournamentActionSchema.safeParse({ action: "late_checkin", revision: 1, entryId, group: "all" }).success, false);
+});
 test("registration edits require an offset timestamp and revision; onsite check-in must be explicit", () => {
   assert.equal(tournamentActionSchema.safeParse({ action: "edit_registration", revision: 0, registration_deadline: "2026-10-24T12:00:00+08:00" }).success, true);
   // Past cutoffs are useful for immediately closing registration; ordering is checked against the locked event in SQL.
