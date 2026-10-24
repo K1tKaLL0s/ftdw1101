@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { advanceToCut, nextSwissRound, recordResult, startTournament } from "../lib/tournaments/engine";
+import { specialRoster } from "../lib/tournaments/three-gods";
 import { getCurrentWeekKey, shiftDayKey } from "../lib/week";
 import type { Tournament, TournamentDetail } from "../lib/tournaments/types";
 
@@ -85,6 +86,117 @@ test("participant preregistration is separate from official check-in and exposes
   await expect(page.getByRole("button", { name: "确认正式报到" })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "组织者操作" })).toHaveCount(0);
   await expect(page.getByText(/预报名总数 1\/16 · 已报到（未退赛）0/)).toBeVisible();
+});
+
+test("organizer edits the registration deadline in the event timezone and reopening preserves existing entries", async ({ page }) => {
+  await page.clock.setFixedTime(new Date("2099-10-24T05:00:00Z"));
+  const data: TournamentDetail = {
+    tournament: tournament({ timezone: "Asia/Tokyo", starts_at: "2099-10-24T06:00:00Z", registration_deadline: "2099-10-24T04:30:00Z", entry_count: 1 }),
+    entrants: [{ id: entryId(1), name: "原预报名选手", status: "preregistered" }], mine: null, canManage: true,
+  };
+  let submitted: Record<string, unknown> | undefined;
+  await mockDetail(page, data, input => {
+    submitted = input;
+    if (input.action === "edit_registration") data.tournament.registration_deadline = String(input.registration_deadline);
+  });
+  await page.goto(`/tournaments/${eventId}`);
+  await expect(page.getByText("预报名已截止。", { exact: true })).toBeVisible();
+  const deadline = page.getByLabel("修改预报名截止时间", { exact: true });
+  await expect(deadline).toHaveValue("2099-10-24T13:30");
+  await deadline.fill("2099-10-24T14:30");
+  await page.getByRole("button", { name: "保存预报名时间", exact: true }).click();
+  await expect(page.getByRole("button", { name: "提交预报名", exact: true })).toBeVisible();
+  expect(submitted).toMatchObject({ action: "edit_registration", revision: 0, registration_deadline: "2099-10-24T05:30:00.000Z" });
+  await expect(deadline).toHaveValue("2099-10-24T14:30");
+  await expect(page.getByText(/预报名总数 1\/16 · 已报到（未退赛）0/)).toBeVisible();
+  expect(data.entrants).toEqual([{ id: entryId(1), name: "原预报名选手", status: "preregistered" }]);
+  expect(data.tournament.state).toBeNull(); expect(data.tournament.special_state).toBeNull();
+});
+
+test("event-day onsite entries require explicit check-in and a duplicate leaves the roster intact on mobile", async ({ page }, info) => {
+  await page.clock.setFixedTime(new Date("2099-10-24T05:00:00Z"));
+  const data: TournamentDetail = {
+    tournament: tournament({ starts_at: "2099-10-24T06:00:00Z", registration_deadline: "2099-10-24T04:30:00Z", entry_count: 2, checked_in_count: 1 }),
+    entrants: [{ id: entryId(1), name: "已报名已报到", status: "checked_in" }, { id: entryId(2), name: "已报名待报到", status: "preregistered" }], mine: null, canManage: true,
+  };
+  const submitted: Record<string, unknown>[] = [];
+  await mockDetail(page, data, input => {
+    if (input.action !== "onsite") return;
+    submitted.push(input);
+    const name = String(input.name).trim();
+    if (data.entrants.some(entry => entry.status !== "withdrawn" && entry.name.toLowerCase() === name.toLowerCase())) throw new Error("该昵称已在报名名单中，请确认已有报名的报到状态。");
+    data.entrants.push({ id: entryId(data.entrants.length + 1), name, status: input.checkedIn ? "checked_in" : "preregistered" });
+    data.tournament.entry_count++;
+    if (input.checkedIn) data.tournament.checked_in_count++;
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/tournaments/${eventId}`);
+  const name = page.getByLabel("现场选手昵称", { exact: true });
+  const checkin = page.getByRole("checkbox", { name: "已核对本人到场，直接确认报到", exact: true });
+  await expect(checkin).not.toBeChecked();
+  await name.fill("现场甲");
+  await page.getByRole("button", { name: "补录现场选手", exact: true }).click();
+  await expect(page.getByText(/预报名总数 3\/16 · 已报到（未退赛）1/)).toBeVisible();
+  expect(submitted[0]).toMatchObject({ action: "onsite", revision: 0, name: "现场甲", checkedIn: false });
+  await expect(page.getByRole("listitem").filter({ hasText: "现场甲" })).toContainText("仅预报名");
+  await name.fill("现场乙"); await checkin.check();
+  await page.getByRole("button", { name: "补录现场选手", exact: true }).click();
+  await expect(page.getByText(/预报名总数 4\/16 · 已报到（未退赛）2/)).toBeVisible();
+  expect(submitted[1]).toMatchObject({ action: "onsite", revision: 1, name: "现场乙", checkedIn: true });
+  await expect(page.getByRole("listitem").filter({ hasText: "现场乙" })).toContainText("已报到");
+  expect(data.entrants.slice(0, 2)).toEqual([{ id: entryId(1), name: "已报名已报到", status: "checked_in" }, { id: entryId(2), name: "已报名待报到", status: "preregistered" }]);
+  expect(data.tournament.state).toBeNull(); expect(data.tournament.special_state).toBeNull();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+  await page.screenshot({ path: info.outputPath("onsite-registration-mobile.png"), fullPage: true });
+  const roster = JSON.stringify(data.entrants);
+  await name.fill("现场乙");
+  await page.getByRole("button", { name: "补录现场选手", exact: true }).click();
+  await expect(page.locator("main [role=alert]")).toContainText(/已有|重复|已在|已报名|存在/);
+  expect(JSON.stringify(data.entrants)).toBe(roster);
+  await expect(page.getByText(/预报名总数 4\/16 · 已报到（未退赛）2/)).toBeVisible();
+});
+
+test("registration management is hidden from participants and locked standard or special pools", async ({ page }) => {
+  await page.clock.setFixedTime(new Date("2099-10-24T05:00:00Z"));
+  const people = [1, 2].map(i => ({ id: entryId(i), name: `已锁定选手${i}`, status: "checked_in" as const }));
+  const data: TournamentDetail = {
+    tournament: tournament({ format: "pseudo_double", starts_at: "2099-10-24T06:00:00Z", registration_deadline: "2099-10-24T04:30:00Z", entry_count: 2, checked_in_count: 2 }),
+    entrants: people, mine: null, canManage: false,
+  };
+  await mockDetail(page, data); await page.goto(`/tournaments/${eventId}`);
+  await expect(page.getByRole("heading", { name: "报名名单", exact: true })).toBeVisible();
+  await expect(page.getByLabel("修改预报名截止时间", { exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("现场选手昵称", { exact: true })).toHaveCount(0);
+  data.canManage = true;
+  data.tournament.state = startTournament({ format: "pseudo_double", swissRounds: 3, topCut: 2 }, people.map((entry, i) => ({ id: entry.id, name: entry.name, seed: i + 1, active: true })));
+  data.tournament.status = "running";
+  const standardState = JSON.stringify(data.tournament.state);
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "胜者组", exact: true })).toBeVisible();
+  await expect(page.getByLabel("修改预报名截止时间", { exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("现场选手昵称", { exact: true })).toHaveCount(0);
+  expect(JSON.stringify(data.tournament.state)).toBe(standardState);
+  data.tournament.format = "three_gods"; data.tournament.state = null;
+  data.tournament.special_state = specialRoster("single", people);
+  const specialState = JSON.stringify(data.tournament.special_state);
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "组织者操作", exact: true })).toBeVisible();
+  await expect(page.getByLabel("修改预报名截止时间", { exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("现场选手昵称", { exact: true })).toHaveCount(0);
+  expect(JSON.stringify(data.tournament.special_state)).toBe(specialState);
+});
+
+test("onsite registration cannot be submitted before the event local date", async ({ page }) => {
+  await page.clock.setFixedTime(new Date("2099-10-23T14:30:00Z"));
+  const data: TournamentDetail = {
+    tournament: tournament({ timezone: "Asia/Tokyo", starts_at: "2099-10-24T06:00:00Z", registration_deadline: "2099-10-24T04:30:00Z" }), entrants: [], mine: null, canManage: true,
+  };
+  let posts = 0;
+  await mockDetail(page, data, () => { posts++; }); await page.goto(`/tournaments/${eventId}`);
+  await expect(page.getByLabel("修改预报名截止时间", { exact: true })).toBeVisible();
+  const onsite = page.getByRole("button", { name: "补录现场选手", exact: true });
+  await expect.poll(async () => await onsite.count() === 0 || await onsite.isDisabled()).toBe(true);
+  expect(posts).toBe(0);
 });
 
 test("owner confirms event-day arrival; only checked-in entrants start a pseudo-double bracket", async ({ page }, info) => {

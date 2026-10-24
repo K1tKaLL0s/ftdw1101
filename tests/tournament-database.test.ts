@@ -9,6 +9,7 @@ let db: PGlite;
 const owner = "1".repeat(64), outsider = "2".repeat(64), player = "3".repeat(64), admin = "4".repeat(64);
 const tournamentMigration = "20261021081932_tournaments.sql";
 let productionBefore: unknown, productionAfter: unknown;
+let registrationUpgradeBefore: unknown, registrationUpgradeAfter: unknown;
 async function productionSnapshot() {
   return (await db.query<{ value: unknown }>(`select jsonb_build_object(
     'profiles',(select jsonb_agg(to_jsonb(p) order by id) from public.profiles p),
@@ -26,15 +27,24 @@ async function create(status = "published", capacity = 8, overrides: Record<stri
     starts_at: new Date(Date.now() + 2 * 86_400_000).toISOString(), registration_deadline: new Date(Date.now() + 86_400_000).toISOString(),
     capacity, format: "pseudo_double", swiss_rounds: 3, top_cut: 2, tie_break_policy: "现场公开抽签", extra_rules: "", status, ...overrides })]);
 }
-type Detail = { tournament: { id: string; revision: number; state: unknown; special_state: ThreeGodsState | null; entry_count: number; checked_in_count: number; status: string }; entrants: { id: string; name: string; status: string }[]; mine: string | null; canManage: boolean };
+type Detail = { tournament: { id: string; revision: number; state: unknown; special_state: ThreeGodsState | null; entry_count: number; checked_in_count: number; status: string; registration_deadline: string }; entrants: { id: string; name: string; status: string }[]; mine: string | null; canManage: boolean };
 const detail = (id: string, session = owner) => call<Detail>("app_tournament_detail", [session, id]);
 const registration = (id: string, session: string, action: string, name = "", entryId: string | null = null) => call<{ id: string }>("app_tournament_registration", [session, id, action, name, entryId]);
+const editDeadline = (id: string, revision: number, deadline: string | null, session = owner) => call<boolean>("app_tournament_edit_registration", [session, id, revision, deadline]);
+const onsite = (id: string, revision: number, name: string, checkedIn: boolean | null, session = owner) => call<{ id: string }>("app_tournament_onsite", [session, id, revision, name, checkedIn]);
+const eventDay = (id: string) => db.query("update public.tournaments set starts_at=now(),registration_deadline=now() where id=$1", [id]);
+async function registrationSnapshot() {
+  return (await db.query<{ value: unknown }>(`select jsonb_build_object(
+    'production',$1::jsonb,'tournaments',(select jsonb_agg(to_jsonb(t) order by id) from public.tournaments t),
+    'entries',(select jsonb_agg(to_jsonb(e) order by id) from public.tournament_entries e)
+  ) value`, [JSON.stringify(await productionSnapshot())])).rows[0].value;
+}
 before(async () => {
   db = new PGlite();
   await db.exec("create role anon;create role authenticated;create role service_role;create schema auth;create table auth.users(id uuid primary key,email text unique,raw_user_meta_data jsonb not null default '{}'::jsonb,raw_app_meta_data jsonb not null default '{}'::jsonb,created_at timestamptz not null default now());");
   await db.exec("create schema storage;create table storage.buckets(id text primary key,name text not null,public boolean not null default false,file_size_limit bigint,allowed_mime_types text[]);");
-  const migrations = (await readdir("supabase/migrations")).filter(path => path.endsWith(".sql") && path !== tournamentMigration).sort();
-  for (const path of migrations) await db.exec(await readFile(`supabase/migrations/${path}`, "utf8"));
+  const migrations = (await readdir("supabase/migrations")).filter(path => path.endsWith(".sql")).sort();
+  for (const path of migrations.filter(path => path < tournamentMigration)) await db.exec(await readFile(`supabase/migrations/${path}`, "utf8"));
   for (let i = 1; i <= 4; i++) {
     const id = `00000000-0000-4000-8000-00000000000${i}`;
     await db.query("insert into auth.users(id,email,raw_app_meta_data) values($1,$2,$3::jsonb)", [id, `test${i}@team-slots.local`, JSON.stringify({ username: `test${i}`, device_hash: String(i).repeat(64) })]);
@@ -44,11 +54,26 @@ before(async () => {
   productionBefore = await productionSnapshot();
   await db.exec(await readFile(`supabase/migrations/${tournamentMigration}`, "utf8"));
   productionAfter = await productionSnapshot();
+  // Seed real pre-upgrade account registrations (including legacy duplicate nicknames)
+  // and locked normal/special state before applying the additive registration upgrade.
+  const existing = await create();
+  await registration(existing, owner, "join", "旧同名选手");
+  await registration(existing, outsider, "join", "旧同名选手");
+  await db.query("update public.tournaments set status='running',state=$2::jsonb where id=$1", [existing, JSON.stringify({ version: 1, matches: [{ id: "preserved-match", result: "a_win" }], entrants: [] })]);
+  const special = await create("published", 8, { format: "three_gods" });
+  await db.query("update public.tournaments set status='running',special_state=$2::jsonb where id=$1", [special, JSON.stringify({ version: 1, players: [], matches: [{ id: "preserved-special" }] })]);
+  registrationUpgradeBefore = await registrationSnapshot();
+  for (const path of migrations.filter(path => path > tournamentMigration)) await db.exec(await readFile(`supabase/migrations/${path}`, "utf8"));
+  registrationUpgradeAfter = await registrationSnapshot();
 });
 after(async () => { await db.close(); });
 
 test("the single additive tournament migration preserves production account/session data and five-slot writers", () => {
   assert.deepEqual(productionAfter, productionBefore);
+});
+
+test("registration upgrade preserves existing entries, duplicate legacy names, locked matches, accounts and sessions", () => {
+  assert.deepEqual(registrationUpgradeAfter, registrationUpgradeBefore);
 });
 
 test("ordinary active users can publish; event ownership and drafts are isolated; existing admin moderation remains", async () => {
@@ -150,4 +175,139 @@ test("special roster is checked-in only; score/card transaction has revision pro
   assert.equal(after.tournament.special_state!.players.reduce((sum, p) => sum + p.points, 0), 5);
   assert.equal(after.tournament.special_state!.players.reduce((sum, p) => sum + Object.values(p.stock).reduce((a, b) => a + b, 0), 0), 2);
   await assert.rejects(call("app_tournament_special_commit", [outsider, id, after.tournament.revision, JSON.stringify(s), replay.key, s.commands[replay.key]]), /forbidden/);
+});
+
+test("only organizer/admin may close or reopen registration before pool locking, with revision and schedule checks", async () => {
+  const id = await create();
+  const existing = await registration(id, player, "join", "保留报名");
+  const before = await detail(id);
+  const future = new Date(Date.now() + 3600_000).toISOString();
+  await assert.rejects(editDeadline(id, before.tournament.revision, future, outsider), /forbidden/);
+  await assert.rejects(editDeadline(id, before.tournament.revision - 1, future), /revision conflict/);
+  for (const invalid of [null, "infinity", new Date(Date.now() + 3 * 86_400_000).toISOString()]) {
+    await assert.rejects(editDeadline(id, before.tournament.revision, invalid), /deadline/);
+  }
+  await editDeadline(id, before.tournament.revision, new Date(0).toISOString());
+  await assert.rejects(registration(id, outsider, "join", "已截止"), /registration closed/);
+  const closed = await detail(id);
+  assert.deepEqual(closed.entrants, before.entrants);
+  assert.equal(closed.entrants[0].id, existing.id);
+  assert.equal(closed.tournament.state, before.tournament.state);
+  await editDeadline(id, closed.tournament.revision, future, admin);
+  await registration(id, outsider, "join", "重新开放后报名");
+  const reopened = await detail(id);
+  assert.equal(Date.parse(reopened.tournament.registration_deadline), Date.parse(future));
+  const revision = reopened.tournament.revision;
+  await editDeadline(id, revision, future);
+  assert.equal((await detail(id)).tournament.revision, revision, "saving the unchanged cutoff is a no-op");
+  const draft = await create("draft");
+  await editDeadline(draft, 0, future);
+  for (const status of ["running", "completed", "cancelled"]) {
+    await db.query("update public.tournaments set status=$2 where id=$1", [draft, status]);
+    await assert.rejects(editDeadline(draft, 1, future), /locked after start/);
+  }
+  await db.query("update public.tournaments set status='published',special_state='{}'::jsonb where id=$1", [draft]);
+  await assert.rejects(editDeadline(draft, 1, future), /locked after start/);
+  await db.exec("update public.profiles set status='banned' where username='test1'");
+  try { await assert.rejects(editDeadline(id, revision, future), /unauthenticated/); }
+  finally { await db.exec("update public.profiles set status='active' where username='test1'"); }
+  const audit = await db.query<{ n: number }>("select count(*)::int n from public.audit_log where action='tournament_edit_registration' and reason like $1", [id + "%"]);
+  assert.equal(audit.rows[0].n, 2, "cutoff changes record actor and old/new times, while unchanged saves do not");
+});
+
+test("onsite registration is event-day organizer-only, explicit about check-in, and serializes duplicates/capacity", async () => {
+  const id = await create("published", 3);
+  const existing = await registration(id, player, "join", "PreRegistered");
+  await assert.rejects(onsite(id, 1, "Guest", true), /event day/);
+  await eventDay(id);
+  await assert.rejects(onsite(id, 1, "Guest", true, outsider), /forbidden/);
+  await assert.rejects(onsite(id, 0, "Guest", true), /revision conflict/);
+  await assert.rejects(onsite(id, 1, "Guest", null), /invalid onsite entry/);
+  await assert.rejects(onsite(id, 1, " preregistered ", true), /duplicate entry name/);
+  assert.equal((await detail(id)).entrants.find(e => e.id === existing.id)!.status, "preregistered", "duplicate submission cannot silently check in an existing player");
+  const guest = await onsite(id, 1, "Alice", false);
+  assert.equal((await detail(id)).entrants.find(e => e.id === guest.id)!.status, "preregistered");
+  const stored = (await db.query<{ user_id: string | null; checked_in_at: string | null }>("select user_id,checked_in_at from public.tournament_entries where id=$1", [guest.id])).rows[0];
+  assert.deepEqual(stored, { user_id: null, checked_in_at: null });
+  await assert.rejects(onsite(id, 1, "Alice", false), /revision conflict/, "replaying the successful revision cannot create another guest");
+  await assert.rejects(onsite(id, 2, " ＡＬＩＣＥ ", true), /duplicate entry name/);
+  const outcomes = await Promise.allSettled([onsite(id, 2, "最后名额甲", true, admin), onsite(id, 2, "最后名额乙", true)]);
+  assert.equal(outcomes.filter(outcome => outcome.status === "fulfilled").length, 1);
+  assert.equal(outcomes.filter(outcome => outcome.status === "rejected").length, 1);
+  const full = await detail(id);
+  assert.equal(full.tournament.entry_count, 3);
+  assert.equal(full.tournament.checked_in_count, 1);
+  await assert.rejects(onsite(id, full.tournament.revision, "超额者", true), /full/);
+  await registration(id, owner, "checkin", "", guest.id);
+  assert.equal((await detail(id)).tournament.checked_in_count, 2, "pending onsite players use the existing deliberate check-in action");
+  const snapshot = await detail(id);
+  await db.exec("update public.profiles set status='banned' where username='test1'");
+  try { await assert.rejects(onsite(id, snapshot.tournament.revision, "被禁用主办操作", true), /unauthenticated/); }
+  finally { await db.exec("update public.profiles set status='active' where username='test1'"); }
+  assert.deepEqual(await detail(id), snapshot);
+  const audit = await db.query<{ n: number }>("select count(*)::int n from public.audit_log where action='tournament_onsite' and reason like $1", [id + "%"]);
+  assert.equal(audit.rows[0].n, 2);
+});
+
+test("regular registration cannot duplicate onsite guest names; drafts, other dates and locked pools reject onsite writes", async () => {
+  const id = await create();
+  await eventDay(id);
+  await onsite(id, 0, "ReservedGuest", true);
+  // Set a future cutoff only for this join collision test; no event-day boundary depends on this change.
+  await db.query("update public.tournaments set starts_at=now()+interval '1 day',registration_deadline=now()+interval '1 hour' where id=$1", [id]);
+  await assert.rejects(registration(id, player, "join", " reservedguest "), /duplicate entry name/);
+  assert.equal((await detail(id)).tournament.entry_count, 1);
+  await assert.rejects(onsite(id, 1, "NextDay", true), /event day/);
+  await eventDay(id);
+  for (const status of ["draft", "running", "completed", "cancelled"]) {
+    await db.query("update public.tournaments set status=$2 where id=$1", [id, status]);
+    await assert.rejects(onsite(id, 1, "不应添加", true), /locked after start/);
+  }
+  await db.query("update public.tournaments set status='published',state='{}'::jsonb where id=$1", [id]);
+  await assert.rejects(onsite(id, 1, "不应添加", true), /locked after start/);
+  await db.query("update public.tournaments set state=null,special_state='{}'::jsonb where id=$1", [id]);
+  await assert.rejects(onsite(id, 1, "不应添加", true), /locked after start/);
+});
+
+test("onsite players enter normal and special pools only after check-in, and locked matches remain unchanged", async () => {
+  for (const format of ["pseudo_double", "three_gods"]) {
+    const id = await create("published", 8, { format });
+    await eventDay(id);
+    const first = await onsite(id, 0, "现场已报到甲", true);
+    const pending = await onsite(id, 1, "现场待报到乙", false);
+    const second = await onsite(id, 2, "现场已报到丙", true);
+    const d = await detail(id);
+    const checkedIn = d.entrants.filter(e => e.status === "checked_in");
+    assert.deepEqual(checkedIn.map(e => e.id).sort(), [first.id, second.id].sort());
+    if (format === "three_gods") {
+      const forged = specialRoster("single", d.entrants);
+      await assert.rejects(call("app_tournament_special_start", [owner, id, d.tournament.revision, JSON.stringify(forged)]), /only checked-in/);
+      await call("app_tournament_special_start", [owner, id, d.tournament.revision, JSON.stringify(specialRoster("single", checkedIn))]);
+    } else {
+      const state = startTournament({ format: "pseudo_double", swissRounds: 3, topCut: 2 }, checkedIn.map((e, i) => ({ id: e.id, name: e.name, seed: i + 1, active: true })));
+      await call("app_tournament_commit", [owner, id, d.tournament.revision, JSON.stringify(state), "start"]);
+    }
+    const locked = await detail(id);
+    await assert.rejects(onsite(id, locked.tournament.revision, "迟到补录", true), /locked after start/);
+    await assert.rejects(editDeadline(id, locked.tournament.revision, new Date(0).toISOString()), /locked after start/);
+    await assert.rejects(registration(id, owner, "checkin", "", pending.id), /event day before start/);
+    assert.deepEqual(await detail(id), locked);
+  }
+});
+
+test("new registration RPCs stay service-only and require a valid opaque application session", async () => {
+  const id = await create();
+  await assert.rejects(editDeadline(id, 0, new Date(0).toISOString(), "f".repeat(64)), /unauthenticated/);
+  await assert.rejects(onsite(id, 0, "无效会话", true, "f".repeat(64)), /unauthenticated/);
+  await db.query("update public.app_sessions set revoked_at=now() where token_hash=$1", [owner]);
+  try {
+    await assert.rejects(editDeadline(id, 0, new Date(0).toISOString()), /unauthenticated/);
+    await assert.rejects(onsite(id, 0, "已撤销会话", true), /unauthenticated/);
+  } finally { await db.query("update public.app_sessions set revoked_at=null where token_hash=$1", [owner]); }
+  for (const signature of ["public.app_tournament_edit_registration(text,uuid,integer,timestamptz)", "public.app_tournament_onsite(text,uuid,integer,text,boolean)"]) {
+    for (const role of ["anon", "authenticated", "service_role"]) {
+      const privilege = await db.query<{ allowed: boolean }>("select has_function_privilege($1,$2,'execute') allowed", [role, signature]);
+      assert.equal(privilege.rows[0].allowed, role === "service_role");
+    }
+  }
 });

@@ -1,11 +1,24 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { tournamentCreateSchema, titleLength } from "../lib/tournaments/validation";
+import { tournamentActionSchema, tournamentCreateSchema, titleLength } from "../lib/tournaments/validation";
 import { calendarCell, localEventTime } from "../lib/tournaments/dates";
 
 const valid = () => ({ title: "校园杯", location: "活动室", format: "swiss_cut", capacity: 16, swiss_rounds: 3, top_cut: 4,
   timezone: "Asia/Shanghai", starts_at: new Date(Date.now() + 86_400_000).toISOString(),
   registration_deadline: new Date(Date.now() + 3600_000).toISOString(), tie_break_policy: "现场公开抽签", status: "published" });
+test("registration edits require an offset timestamp and revision; onsite check-in must be explicit", () => {
+  assert.equal(tournamentActionSchema.safeParse({ action: "edit_registration", revision: 0, registration_deadline: "2026-10-24T12:00:00+08:00" }).success, true);
+  // Past cutoffs are useful for immediately closing registration; ordering is checked against the locked event in SQL.
+  assert.equal(tournamentActionSchema.safeParse({ action: "edit_registration", revision: 0, registration_deadline: new Date(0).toISOString() }).success, true);
+  for (const value of ["invalid", "2026-10-24T12:00", "2026-02-30T12:00:00Z"]) {
+    assert.equal(tournamentActionSchema.safeParse({ action: "edit_registration", revision: 0, registration_deadline: value }).success, false);
+  }
+  assert.equal(tournamentActionSchema.safeParse({ action: "edit_registration", registration_deadline: valid().registration_deadline }).success, false);
+  assert.deepEqual(tournamentActionSchema.parse({ action: "onsite", revision: 2, name: " 现场甲 ", checkedIn: false }), { action: "onsite", revision: 2, name: "现场甲", checkedIn: false });
+  for (const change of [{ checkedIn: undefined }, { checkedIn: "true" }, { name: "  " }, { name: "人".repeat(31) }, { revision: -1 }]) {
+    assert.equal(tournamentActionSchema.safeParse({ action: "onsite", revision: 0, name: "现场甲", checkedIn: true, ...change }).success, false);
+  }
+});
 test("title is trimmed, mandatory, and limited to 25 perceived characters for CJK, emoji and combining sequences", () => {
   for (const char of ["赛", "🃏", "👨‍👩‍👧‍👦", "e\u0301", "🇨🇳"]) {
     assert.equal(titleLength(`  ${char.repeat(25)}  `), 25);

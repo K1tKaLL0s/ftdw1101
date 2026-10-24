@@ -20,6 +20,21 @@ export class AppError extends Error {
 }
 
 export function fromDatabaseError(code: string | undefined, message: string): AppError {
+  if (message.includes("duplicate entry name")) {
+    return new AppError(409, "duplicate_entry", "同名选手已有报名，请在名单中确认报到；不同选手请使用可区分的昵称。");
+  }
+  if (message.includes("onsite registration only on event day")) {
+    return new AppError(409, "event_day_only", "现场补录仅在赛事当地日期当天、锁定选手池前开放。");
+  }
+  if (message.includes("registration locked after start")) {
+    return new AppError(409, "registration_locked", "赛事已锁定选手池或结束，不能再修改预报名时间或现场补录。");
+  }
+  if (message.includes("deadline must not be later than start")) {
+    return new AppError(422, "invalid_deadline", "预报名截止不能晚于开赛时间。");
+  }
+  if (message === "full") {
+    return new AppError(409, "tournament_full", "报名人数已达上限，不能继续报名或补录。");
+  }
   if (message.toLowerCase().includes("schedule version mismatch")) {
     return new AppError(422, "schedule_version_mismatch", "时段已更新，请刷新页面后重试。");
   }

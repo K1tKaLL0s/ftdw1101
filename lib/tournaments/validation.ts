@@ -29,6 +29,8 @@ export const tournamentCreateSchema = z.object({
 });
 const revision = z.number().int().min(0);
 export const tournamentActionSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("edit_registration"), revision, registration_deadline: z.iso.datetime({ offset: true }) }),
+  z.object({ action: z.literal("onsite"), revision, name: z.string().trim().min(1).max(30), checkedIn: z.boolean() }),
   z.object({ action: z.literal("special"), revision, commandId: z.uuid(), command: threeGodsCommandSchema }),
   z.object({ action: z.literal("join"), name: z.string().trim().min(1).max(30) }),
   z.object({ action: z.literal("leave") }),

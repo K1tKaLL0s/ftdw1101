@@ -2,13 +2,46 @@
 import { use, useEffect, useState, type FormEvent } from "react";
 import { postJson } from "@/lib/api";
 import { standings, type Match, type Result, type Source } from "@/lib/tournaments/engine";
-import { displayEventTime } from "@/lib/tournaments/dates";
-import { formatNames, statusNames, type TournamentDetail } from "@/lib/tournaments/types";
+import { displayEventTime, localEventTime } from "@/lib/tournaments/dates";
+import { formatNames, statusNames, type Tournament, type TournamentDetail } from "@/lib/tournaments/types";
 import { FormatRules, TournamentHeader, buttonClass, secondaryClass, inputClass, errorMessage, useTournamentData } from "@/components/tournaments/shared";
 import { ThreeGodsManager } from "@/components/tournaments/three-gods-manager";
 
 const resultNames: Record<Result, string> = { a_win: "A 胜", b_win: "B 胜", draw: "平局", double_loss: "双方判负", bye: "轮空晋级", void: "空签 / 双方退赛" };
 const bracketNames = { swiss: "瑞士轮", cut: "晋级单败淘汰赛", winners: "胜者组", losers: "败者组", final: "总决赛 · 单场无 reset" };
+function RegistrationManagement({ tournament, eventDay, busy, act }: { tournament: Tournament; eventDay: boolean; busy: boolean; act: (value: Record<string, unknown>, saved?: () => void) => Promise<void> }) {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: tournament.timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(tournament.registration_deadline));
+  const part = (type: string) => parts.find(item => item.type === type)!.value;
+  const [deadline, setDeadline] = useState(`${part("year")}-${part("month")}-${part("day")}T${part("hour")}:${part("minute")}`);
+  const [name, setName] = useState(""); const [checkedIn, setCheckedIn] = useState(false); const [error, setError] = useState("");
+  async function saveDeadline(event: FormEvent) {
+    event.preventDefault(); setError("");
+    try {
+      const registration_deadline = localEventTime(deadline, tournament.timezone);
+      if (Date.parse(registration_deadline) > Date.parse(tournament.starts_at)) throw new Error("预报名截止不能晚于开赛时间。");
+      await act({ action: "edit_registration", registration_deadline });
+    } catch (reason) { setError(errorMessage(reason)); }
+  }
+  return <div className="space-y-5">
+    {error && <p role="alert" className="text-sm text-rose-900">{error}</p>}
+    <form onSubmit={event => void saveDeadline(event)} className="space-y-2">
+      <h3 className="font-semibold">修改预报名时间</h3>
+      <label className="block max-w-md text-sm">修改预报名截止时间<input type="datetime-local" required value={deadline} onChange={event => setDeadline(event.target.value)} disabled={busy} className={inputClass} /></label>
+      <p className="text-sm text-slate-600">按 {tournament.timezone} 时间保存，不能晚于开赛时间。设为过去可立即截止，设为未来可重新开放；已有报名保留。</p>
+      <button disabled={busy} className={secondaryClass}>保存预报名时间</button>
+    </form>
+    {tournament.status === "published" && <form className="space-y-3 border-t border-blue-200 pt-4" onSubmit={event => { event.preventDefault(); void act({ action: "onsite", name, checkedIn }, () => { setName(""); setCheckedIn(false); }); }}>
+      <h3 className="font-semibold">现场补录</h3>
+      <p className="text-sm text-slate-600">仅在赛事当地日期当天、锁定选手池前补录，无需创建账号。昵称将公开显示；同名已有报名请在名单中确认报到。</p>
+      <label className="block max-w-md text-sm">现场选手昵称<input required maxLength={30} value={name} onChange={event => setName(event.target.value)} disabled={busy || !eventDay} className={inputClass} /></label>
+      <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={checkedIn} onChange={event => setCheckedIn(event.target.checked)} disabled={busy || !eventDay} className="mt-1" />已核对本人到场，直接确认报到</label>
+      <p className="text-sm text-slate-600">{checkedIn ? "保存为已报到，开赛时加入选手池。" : "保存为仅报名，仍需确认报到才可进入选手池。"}</p>
+      {!eventDay && <p className="text-sm text-amber-900">现场补录将在赛事当地日期当天开放。</p>}
+      <button disabled={busy || !eventDay || tournament.entry_count >= tournament.capacity} className={secondaryClass}>补录现场选手</button>
+      {tournament.entry_count >= tournament.capacity && <p className="text-sm text-amber-900">报名人数已达上限。</p>}
+    </form>}
+  </div>;
+}
 function sourceName(source: Source): string { return source && "match" in source ? `${source.match} ${source.take === "winner" ? "胜者" : "败者"}` : "空签"; }
 function MatchCard({ match, name, canManage, busy, act }: { match: Match; name: (id: string | null) => string; canManage: boolean; busy: boolean; act: (value: Record<string, unknown>) => Promise<void> }) {
   const [result, setResult] = useState(match.result ?? "a_win"); const [reason, setReason] = useState("");
@@ -36,10 +69,10 @@ export default function TournamentDetailPage({ params }: { params: Promise<{ id:
   const [name, setName] = useState(""); const [cutOrder, setCutOrder] = useState(""); const [cutReason, setCutReason] = useState("");
   const [dropId, setDropId] = useState(""); const [dropReason, setDropReason] = useState(""); const [cancelReason, setCancelReason] = useState(""); const [startConfirmed, setStartConfirmed] = useState(false);
   const [manualPairs, setManualPairs] = useState(""); const [manualReason, setManualReason] = useState(""); const [allowRematches, setAllowRematches] = useState(false); const [allowRepeatBye, setAllowRepeatBye] = useState(false);
-  async function act(value: Record<string, unknown>) {
+  async function act(value: Record<string, unknown>, saved?: () => void) {
     if (!data || busy) return;
     setBusy(true); setError(""); setNotice("");
-    try { await postJson(`/api/tournaments/${id}`, { revision: data.tournament.revision, ...value }); reload(); setNotice("操作已保存，正在刷新赛事。 "); }
+    try { await postJson(`/api/tournaments/${id}`, { revision: data.tournament.revision, ...value }); saved?.(); if (["onsite", "checkin", "join", "leave"].includes(String(value.action))) setStartConfirmed(false); reload(); setNotice("操作已保存，正在刷新赛事。 "); }
     catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
   }
   async function cut(event: FormEvent) {
@@ -81,7 +114,7 @@ export default function TournamentDetailPage({ params }: { params: Promise<{ id:
       <p className="text-sm leading-6"><strong>完全同分办法：</strong>{t.tie_break_policy}</p>{t.extra_rules && <p className="whitespace-pre-wrap break-words text-sm leading-6"><strong>补充规则：</strong>{t.extra_rules}</p>}
     </section>
     {t.status === "published" && <section className="mb-5 rounded-xl border border-slate-200 bg-white p-5"><h2 className="text-lg font-bold">预报名与报到</h2>
-      <p className="my-3 text-sm leading-6 text-slate-600">预报名不会自动进入选手池。请在赛事当地日期当天到场，由发布者确认报到。开赛后需要退赛或补到，请联系发布者；已公布配对不会自动重排。</p>
+      <p className="my-3 text-sm leading-6 text-slate-600">预报名不会自动进入选手池。请在赛事当地日期当天到场，由发布者确认报到。未预报名者可在锁定选手池前由发布者现场补录；开赛后停止补录，已公布配对保持不变。</p>
       {mine && mine.status !== "withdrawn" ? <div className="flex flex-wrap items-center gap-3"><p className="font-medium">你已{mine.status === "checked_in" ? "完成正式报到" : "预报名，等待当天报到"}：{mine.name}</p><button disabled={busy} className={secondaryClass} onClick={() => void act({ action: "leave" })}>撤回本人报名</button></div>
         : registrationOpen ? <form className="space-y-3" onSubmit={event => { event.preventDefault(); void act({ action: "join", name }); }}>
           <label className="block max-w-md text-sm font-semibold">参赛显示昵称<input value={name} required maxLength={30} onChange={event => setName(event.target.value)} className={inputClass} disabled={busy} /></label>
@@ -95,6 +128,7 @@ export default function TournamentDetailPage({ params }: { params: Promise<{ id:
       {data.canManage && t.status === "published" && !eventDay && <p className="mt-3 text-sm text-amber-900">尚未到赛事当地日期，正式报到未开放。</p>}
     </section>
     {data.canManage && <section className="mb-5 space-y-4 rounded-xl border border-blue-200 bg-blue-50 p-5"><h2 className="text-lg font-bold">组织者操作</h2>
+      {["draft", "published"].includes(t.status) && !state && !t.special_state && <RegistrationManagement key={`${t.id}:${t.registration_deadline}`} tournament={t} eventDay={eventDay} busy={busy} act={act} />}
       {t.status === "draft" && <button disabled={busy} onClick={() => void act({ action: "publish" })} className={buttonClass}>发布并开放预报名</button>}
       {t.status === "published" && <div className="space-y-3"><label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={startConfirmed} onChange={event => setStartConfirmed(event.target.checked)} className="mt-1" />我已核对现场名单。立即截止报名，仅将 {t.checked_in_count} 名已报到者加入选手池，锁定规则与初始种子。</label><button disabled={busy || !startConfirmed || t.checked_in_count < 2} className={buttonClass} onClick={() => void act({ action: "start" })}>{t.format === "three_gods" ? "截止报名并锁定三幻神选手池" : "截止报名并正式开赛"}</button><p className="text-xs text-slate-600">未报到者不会上场。{t.format === "three_gods" ? "锁定后核对初始神，再单独启动正赛计时与匹配。" : "人数不足所选轮数或晋级人数时，开赛会被拒绝。"}</p></div>}
       {state?.phase === "swiss" && <><button disabled={busy} onClick={() => void act({ action: "next_swiss" })} className={buttonClass}>{state.currentRound >= t.swiss_rounds ? "结束瑞士轮并核对晋级" : "确认本轮结束，生成下一轮"}</button>
