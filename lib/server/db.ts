@@ -10,6 +10,7 @@ type RpcName =
   | "app_tournament_registration"
   | "app_tournament_edit_registration"
   | "app_tournament_onsite"
+  | "app_tournament_late_entry"
   | "app_tournament_status"
   | "app_tournament_commit"
   | "app_tournament_special_commit"
